@@ -1,0 +1,29 @@
+# Generated files
+/target/
+
+
+# Cargo lock (keep for binaries, ignore for libraries)
+# Cargo.lock
+
+# Backup files
+**/*.rs.bk
+
+# IDE / Editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Environment variables
+.env
+.env.local
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Profiling
+perf.data
+perf.data.old
+flamegraph.svg
