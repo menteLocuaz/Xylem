@@ -1,8 +1,0 @@
-return {
-  install_info = {
-    revision = '4e0875f724d94d0c2ff36f9b8cb0b12f8b20d216',
-    url = 'https://github.com/ColinKennedy/tree-sitter-usd',
-  },
-  maintainers = { '@ColinKennedy' },
-  tier = 2,
-}

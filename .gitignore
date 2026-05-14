@@ -1,5 +1,7 @@
 # Generated files
 /target/
+.agents
+skills-lock.json
 
 
 # Cargo lock (keep for binaries, ignore for libraries)
