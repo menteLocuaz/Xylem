@@ -1,107 +1,12 @@
 use xylem::runtime::state::RuntimeState;
 use xylem::editor::events::EditorEvent;
 use xylem::editor::messages::{XylemMessage, ServerCommand};
+use xylem::editor::rpc_server::XylemServer;
 
 use std::io::Write;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::RwLock;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader, stdin};
 use tokio::sync::mpsc;
-
-struct XylemServer {
-    tx: mpsc::Sender<ServerCommand>,
-    running: Arc<AtomicBool>,
-}
-
-impl XylemServer {
-    fn new(tx: mpsc::Sender<ServerCommand>) -> Self {
-        Self {
-            tx,
-            running: Arc::new(AtomicBool::new(true)),
-        }
-    }
-
-    async fn process_stdin(&self) -> anyhow::Result<()> {
-        let mut stdin = BufReader::new(stdin());
-
-        while self.running.load(Ordering::SeqCst) {
-            let mut header = String::new();
-            if stdin.read_line(&mut header).await? == 0 { break; }
-
-            if header.starts_with("Content-Length: ") {
-                let len: usize = header["Content-Length: ".len()..].trim().parse()?;
-
-                let mut next_line = String::new();
-                stdin.read_line(&mut next_line).await?;
-
-                let mut body = vec![0u8; len];
-                stdin.read_exact(&mut body).await?;
-
-                if let Ok(msg) = serde_json::from_slice::<serde_json::Value>(&body) {
-                    self.handle_message(&msg).await?;
-                }
-            } else if !header.trim().is_empty() {
-                if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&header) {
-                    self.handle_message(&msg).await?;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    async fn handle_message(&self, msg: &serde_json::Value) -> anyhow::Result<()> {
-        let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
-        let params = msg.get("params");
-
-        match method {
-            "xylem.change" => {
-                if let Some(p) = params {
-                    let buffer_id = p.get("buffer_id").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let start_byte = p.get("start_byte").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                    let old_end_byte = p.get("old_end_byte").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
-                    let new_text = p.get("new_text").and_then(|t| t.as_str()).unwrap_or("");
-
-                    let event = EditorEvent::Change {
-                        buffer_id,
-                        start_byte,
-                        end_byte: old_end_byte,
-                        text: new_text.to_string(),
-                    };
-
-                    let _ = self.tx.send(ServerCommand::UpdateStateWithReply {
-                        event,
-                        buffer_id,
-                    }).await;
-                }
-            }
-            "xylem.attach" => {
-                if let Some(p) = params {
-                    let buffer_id = p.get("buffer_id").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let _ = self.tx.send(ServerCommand::UpdateState(XylemMessage::Attach { buffer_id })).await;
-                }
-            }
-            "xylem.detach" => {
-                if let Some(p) = params {
-                    let buffer_id = p.get("buffer_id").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let _ = self.tx.send(ServerCommand::UpdateState(XylemMessage::Detach { buffer_id })).await;
-                }
-            }
-            "xylem.parse" => {
-                if let Some(p) = params {
-                    let buffer_id = p.get("buffer_id").and_then(|v| v.as_u64()).unwrap_or(0);
-                    let _ = self.tx.send(ServerCommand::UpdateState(XylemMessage::Parse { buffer_id })).await;
-                }
-            }
-            _ => {}
-        }
-        Ok(())
-    }
-
-    fn shutdown(&self) {
-        self.running.store(false, Ordering::SeqCst);
-    }
-}
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
