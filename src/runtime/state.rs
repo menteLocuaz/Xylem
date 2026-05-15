@@ -24,7 +24,7 @@ impl BufferState {
 
     pub fn set_text(&mut self, text: &str) {
         self.buffer = Rope::from_str(text);
-        self.parser.parse_full(text);
+        self.parser.parse_full(&self.buffer);
         self.is_dirty = false;
     }
 
@@ -44,16 +44,16 @@ impl BufferState {
             start_byte + text.len(),
         ).1;
 
-        self.parser.apply_edit(&tree_sitter::InputEdit {
+        let edit = tree_sitter::InputEdit {
             start_byte,
             old_end_byte: end_byte,
             new_end_byte: start_byte + text.len(),
             start_position: start_pos,
             old_end_position: old_end_pos,
             new_end_position: new_end_pos,
-        });
+        };
         
-        self.parser.parse_rope(&self.buffer);
+        self.parser.parse_incremental(&self.buffer, edit);
 
         self.is_dirty = true;
     }

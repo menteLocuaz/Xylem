@@ -1,12 +1,19 @@
 use ropey::Rope;
 use parking_lot::RwLock;
 use std::sync::Arc;
+use std::ops::Range;
+
+#[derive(Debug, Clone)]
+pub struct DirtyRegion {
+    pub byte_range: Range<usize>,
+}
 
 pub struct Buffer {
     id: u64,
     content: Arc<RwLock<Rope>>,
     version: Arc<RwLock<u64>>,
     is_modified: Arc<RwLock<bool>>,
+    dirty_regions: Arc<RwLock<Vec<DirtyRegion>>>,
 }
 
 impl Buffer {
@@ -16,6 +23,7 @@ impl Buffer {
             content: Arc::new(RwLock::new(Rope::new())),
             version: Arc::new(RwLock::new(0)),
             is_modified: Arc::new(RwLock::new(false)),
+            dirty_regions: Arc::new(RwLock::new(Vec::new())),
         }
     }
 
@@ -24,7 +32,13 @@ impl Buffer {
     }
 
     pub fn set_content(&self, text: &str) {
-        *self.content.write() = Rope::from_str(text);
+        let mut content = self.content.write();
+        *content = Rope::from_str(text);
+        
+        let mut dirty = self.dirty_regions.write();
+        dirty.clear();
+        dirty.push(DirtyRegion { byte_range: 0..content.len_bytes() });
+
         *self.version.write() += 1;
         *self.is_modified.write() = true;
     }
@@ -39,12 +53,20 @@ impl Buffer {
 
     pub fn insert(&self, pos: usize, text: &str) {
         self.content.write().insert(pos, text);
+        
+        let mut dirty = self.dirty_regions.write();
+        dirty.push(DirtyRegion { byte_range: pos..(pos + text.len()) });
+
         *self.version.write() += 1;
         *self.is_modified.write() = true;
     }
 
     pub fn remove(&self, start: usize, end: usize) {
         self.content.write().remove(start..end);
+        
+        let mut dirty = self.dirty_regions.write();
+        dirty.push(DirtyRegion { byte_range: start..start });
+
         *self.version.write() += 1;
         *self.is_modified.write() = true;
     }
@@ -54,11 +76,16 @@ impl Buffer {
     }
 
     pub fn is_modified(&self) -> bool {
-        *self.is_modified.write()
+        *self.is_modified.read()
     }
 
     pub fn mark_saved(&self) {
         *self.is_modified.write() = false;
+        self.dirty_regions.write().clear();
+    }
+
+    pub fn take_dirty_regions(&self) -> Vec<DirtyRegion> {
+        std::mem::take(&mut *self.dirty_regions.write())
     }
 }
 

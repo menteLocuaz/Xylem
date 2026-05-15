@@ -1,5 +1,6 @@
 use tree_sitter::{Parser, Point, Tree, InputEdit, Node};
 use tree_sitter_lua::LANGUAGE;
+use ropey::Rope;
 
 pub struct IncrementalParser {
     parser: Parser,
@@ -9,7 +10,7 @@ pub struct IncrementalParser {
 impl IncrementalParser {
     pub fn new() -> Self {
         let mut parser = Parser::new();
-        parser.set_language(&LANGUAGE.into()).ok();
+        parser.set_language(&LANGUAGE.into()).expect("Error loading Lua grammar");
 
         Self {
             parser,
@@ -17,12 +18,9 @@ impl IncrementalParser {
         }
     }
 
-    pub fn parse(&mut self, source: &str) -> Option<Tree> {
-        self.parser.parse(source, self.tree.as_ref())
-    }
-
-    pub fn parse_rope(&mut self, rope: &ropey::Rope) -> Option<Tree> {
-        self.parser.parse_with(
+    /// Perform a full re-parse of the provided rope.
+    pub fn parse_full(&mut self, rope: &Rope) {
+        self.tree = self.parser.parse_with(
             &mut |byte, _| {
                 if byte >= rope.len_bytes() {
                     return "";
@@ -30,54 +28,32 @@ impl IncrementalParser {
                 let (chunk, chunk_byte_idx, _, _) = rope.chunk_at_byte(byte);
                 &chunk[byte - chunk_byte_idx..]
             },
-            self.tree.as_ref(),
-        )
+            None,
+        );
     }
 
-    pub fn parse_full(&mut self, source: &str) {
-        if let Some(tree) = self.parse(source) {
-            self.tree = Some(tree);
-        }
-    }
+    /// Apply an edit and re-parse incrementally.
+    pub fn parse_incremental(&mut self, rope: &Rope, edit: InputEdit) {
+        if let Some(ref mut tree) = self.tree {
+            tree.edit(&edit);
 
-    pub fn apply_edit(&mut self, edit: &InputEdit) {
-        if let Some(ref mut t) = self.tree {
-            t.edit(edit);
-        }
-    }
-
-    pub fn edit(
-        &mut self,
-        start_byte: usize,
-        old_end_byte: usize,
-        new_end_byte: usize,
-        start_position: Point,
-        old_end_position: Point,
-        new_end_position: Point,
-        source: &str,
-    ) {
-        self.apply_edit(&InputEdit {
-            start_byte,
-            old_end_byte,
-            new_end_byte,
-            start_position,
-            old_end_position,
-            new_end_position,
-        });
-
-        if !source.is_empty() {
-            if let Some(new_tree) = self.parse(source) {
-                self.tree = Some(new_tree);
-            }
+            self.tree = self.parser.parse_with(
+                &mut |byte, _| {
+                    if byte >= rope.len_bytes() {
+                        return "";
+                    }
+                    let (chunk, chunk_byte_idx, _, _) = rope.chunk_at_byte(byte);
+                    &chunk[byte - chunk_byte_idx..]
+                },
+                Some(tree),
+            );
+        } else {
+            self.parse_full(rope);
         }
     }
 
     pub fn root_node(&self) -> Option<Node<'_>> {
         self.tree.as_ref().map(|t| t.root_node())
-    }
-
-    pub fn get_tree(&self) -> Option<&Tree> {
-        self.tree.as_ref()
     }
 }
 
