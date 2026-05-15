@@ -18,10 +18,10 @@ pub enum EditorEvent {
 impl EditorEvent {
     pub fn from_on_lines(
         buffer_id: u64,
-        start_row: usize,
-        end_row: usize,
+        _start_row: usize,
+        _end_row: usize,
         old_num_lines: usize,
-        new_num_lines: usize,
+        _new_num_lines: usize,
         lines: &str,
     ) -> Self {
         let start_byte = 0;

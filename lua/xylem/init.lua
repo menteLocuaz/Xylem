@@ -3,6 +3,13 @@ local M = {}
 local uv = vim.uv
 local job_id = nil
 local stdout_buffer = ""
+M.notifications = {}
+local notification_id = 0
+
+local function generate_id()
+    notification_id = notification_id + 1
+    return "sync_" .. notification_id
+end
 
 function M.start()
     if job_id then
@@ -84,8 +91,29 @@ function M.start()
 end
 
 function M.handle_message(msg)
-    if msg.method == "xylem.highlights" then
-        M.apply_highlights(msg.params.buffer_id, msg.params.highlights)
+    local method = msg.method
+    local id = msg.id
+    local params = msg.params
+
+    if method == "xylem.sync.result" and id and M.notifications[id] then
+        local cb = M.notifications[id].callback
+        if cb then
+            cb(params)
+        end
+        M.notifications[id] = nil
+    elseif method == "xylem.sync.progress" then
+        local cb = M.notifications[id] and M.notifications[id].on_progress
+        if cb then
+            cb(params)
+        end
+    elseif method == "xylem.sync.complete" then
+        local cb = M.notifications[id] and M.notifications[id].on_complete
+        if cb then
+            cb(params)
+        end
+        M.notifications[id] = nil
+    elseif method == "xylem.highlights" then
+        M.apply_highlights(params.buffer_id, params.highlights)
     end
 end
 
@@ -97,6 +125,35 @@ function M.send_message(msg)
     local encoded = vim.json.encode(msg)
     local header = string.format("Content-Length: %d\r\n\r\n", #encoded)
     vim.fn.chansend(job_id, header .. encoded)
+end
+
+function M.sync(opts)
+    opts = opts or {}
+    local lang = opts.lang or "lua"
+    local callback = opts.callback
+
+    local id = generate_id()
+    M.notifications[id] = { callback = callback }
+
+    M.send_message({
+        method = "xylem.sync",
+        id = id,
+        params = { lang = lang },
+    })
+end
+
+function M.sync_all(opts)
+    opts = opts or {}
+    local on_progress = opts.on_progress
+    local on_complete = opts.on_complete
+
+    local id = generate_id()
+    M.notifications[id] = { on_progress = on_progress, on_complete = on_complete }
+
+    M.send_message({
+        method = "xylem.sync_all",
+        id = id,
+    })
 end
 
 function M.setup_autocmds()
