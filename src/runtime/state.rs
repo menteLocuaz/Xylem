@@ -1,15 +1,23 @@
 use ropey::Rope;
 use std::collections::HashMap;
+use std::ops::Range;
 use crate::parser::{IncrementalParser, diff::compute_edit_positions};
 use crate::editor::events::EditorEvent;
 
 use crate::features::highlight::HighlightEngine;
+
+#[derive(Debug, Clone)]
+pub struct DirtyRegion {
+    pub byte_range: Range<usize>,
+}
 
 pub struct BufferState {
     pub buffer: Rope,
     pub parser: IncrementalParser,
     pub highlight_engine: HighlightEngine,
     pub is_dirty: bool,
+    pub version: u64,
+    pub dirty_regions: Vec<DirtyRegion>,
 }
 
 impl BufferState {
@@ -19,6 +27,8 @@ impl BufferState {
             parser: IncrementalParser::new(),
             highlight_engine: HighlightEngine::new(),
             is_dirty: false,
+            version: 0,
+            dirty_regions: Vec::new(),
         }
     }
 
@@ -26,6 +36,9 @@ impl BufferState {
         self.buffer = Rope::from_str(text);
         self.parser.parse_full(&self.buffer);
         self.is_dirty = false;
+        self.version += 1;
+        self.dirty_regions.clear();
+        self.dirty_regions.push(DirtyRegion { byte_range: 0..self.buffer.len_bytes() });
     }
 
     pub fn apply_change(&mut self, start_byte: usize, end_byte: usize, text: &str) {
@@ -56,6 +69,9 @@ impl BufferState {
         self.parser.parse_incremental(&self.buffer, edit);
 
         self.is_dirty = true;
+        self.version += 1;
+        let new_end = start_byte + text.len();
+        self.dirty_regions.push(DirtyRegion { byte_range: start_byte..end_byte.max(new_end) });
     }
 }
 
@@ -100,6 +116,7 @@ impl RuntimeState {
                 let id = if *buffer_id == 0 { self.current_buffer_id } else { *buffer_id };
                 if let Some(state) = self.buffers.get_mut(&id) {
                     state.is_dirty = false;
+                    state.dirty_regions.clear();
                 }
                 true
             }
@@ -118,9 +135,13 @@ impl RuntimeState {
         };
 
         if let Some(root) = state.parser.root_node() {
-            // TODO: Avoid to_string() here by updating HighlightEngine to support Rope
             let source = state.buffer.to_string();
-            state.highlight_engine.apply_highlights(root, source.as_bytes())
+            state.highlight_engine.apply_highlights(
+                root, 
+                source.as_bytes(), 
+                "lua", 
+                tree_sitter_lua::LANGUAGE.into()
+            )
         } else {
             Vec::new()
         }
@@ -133,9 +154,12 @@ impl Default for RuntimeState {
     }
 }
 
-#[derive(Debug, Clone)]
+use serde::{Serialize, Deserialize};
+use crate::parser::queries::types::HighlightKind;
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HighlightRange {
     pub start_byte: usize,
     pub end_byte: usize,
-    pub highlight: String,
+    pub highlight: HighlightKind,
 }
