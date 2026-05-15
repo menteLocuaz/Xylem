@@ -1,6 +1,6 @@
 # Xylem - Incremental Parser for Neovim 0.11+
 
-Minimal Lua plugin that integrates with a Rust-based incremental parser via RPC/stdio.
+Minimal Lua plugin that integrates with a Rust-based incremental parser via RPC/stdio. 
 
 ## Arquitectura
 
