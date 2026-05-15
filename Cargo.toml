@@ -1,7 +1,7 @@
 [package]
 name = "xylem"
 version = "0.1.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 tree-sitter = "0.24"
@@ -28,3 +28,8 @@ lru = "0.8"
 streaming-iterator = "0.1"
 dashmap = "6.1.0"
 fxhash = "0.2.1"
+dirs = "5"
+reqwest = { version = "0.12", features = ["json"] }
+tar = "0.4"
+flate2 = "1.0"
+cc = "1.2"

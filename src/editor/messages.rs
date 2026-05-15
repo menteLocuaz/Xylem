@@ -16,6 +16,13 @@ pub enum RpcRequest {
     Detach { buffer_id: u64 },
     #[serde(rename = "xylem.parse")]
     Parse { buffer_id: u64 },
+    #[serde(rename = "xylem.install")]
+    Install {
+        name: String,
+        repo: String,
+        revision: String,
+        queries: Vec<String>,
+    },
 }
 
 #[derive(Debug, Serialize, Deserialize)]

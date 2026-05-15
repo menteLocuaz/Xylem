@@ -1,5 +1,7 @@
 use crate::editor::messages::{ServerCommand, XylemMessage, RpcRequest};
 use crate::editor::events::EditorEvent;
+use crate::parser::installer::ParserInstaller;
+use crate::parser::registry::GrammarSpec;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, BufReader, stdin};
@@ -68,6 +70,14 @@ impl XylemServer {
             }
             RpcRequest::Parse { buffer_id } => {
                 let _ = self.tx.send(ServerCommand::UpdateState(XylemMessage::Parse { buffer_id })).await;
+            }
+            RpcRequest::Install { name, repo, revision, queries } => {
+                let spec = GrammarSpec { name, repo, revision, queries };
+                tokio::spawn(async move {
+                    if let Ok(path) = ParserInstaller::install(spec).await {
+                        println!("Installed to: {:?}", path);
+                    }
+                });
             }
         }
         Ok(())
