@@ -4,7 +4,7 @@ use std::ops::Range;
 use crate::parser::{IncrementalParser, diff::compute_edit_positions};
 use crate::editor::events::EditorEvent;
 
-use crate::features::highlight::HighlightEngine;
+use crate::features::highlight::{HighlightEngine, HighlightDelta};
 
 #[derive(Debug, Clone)]
 pub struct DirtyRegion {
@@ -13,6 +13,7 @@ pub struct DirtyRegion {
 
 pub struct BufferState {
     pub buffer: Rope,
+    source_bytes: Vec<u8>,
     pub parser: IncrementalParser,
     pub highlight_engine: HighlightEngine,
     pub is_dirty: bool,
@@ -24,6 +25,7 @@ impl BufferState {
     pub fn new() -> Self {
         Self {
             buffer: Rope::new(),
+            source_bytes: Vec::new(),
             parser: IncrementalParser::new(),
             highlight_engine: HighlightEngine::new(),
             is_dirty: false,
@@ -34,6 +36,7 @@ impl BufferState {
 
     pub fn set_text(&mut self, text: &str) {
         self.buffer = Rope::from_str(text);
+        self.source_bytes = text.as_bytes().to_vec();
         self.parser.parse_full(&self.buffer);
         self.is_dirty = false;
         self.version += 1;
@@ -50,6 +53,12 @@ impl BufferState {
         self.buffer.remove(start_char..end_char);
         self.buffer.insert(start_char, text);
 
+        let mut bytes = Vec::with_capacity(self.buffer.len_bytes());
+        for chunk in self.buffer.chunks() {
+            bytes.extend_from_slice(chunk.as_bytes());
+        }
+        self.source_bytes = bytes;
+
         let (start_pos, old_end_pos) = compute_edit_positions(&old_text, start_byte, end_byte);
         let new_end_pos = compute_edit_positions(
             &self.buffer,
@@ -65,13 +74,38 @@ impl BufferState {
             old_end_position: old_end_pos,
             new_end_position: new_end_pos,
         };
-        
+
         self.parser.parse_incremental(&self.buffer, edit);
 
         self.is_dirty = true;
         self.version += 1;
         let new_end = start_byte + text.len();
         self.dirty_regions.push(DirtyRegion { byte_range: start_byte..end_byte.max(new_end) });
+    }
+
+    pub fn compute_highlights(&mut self) -> Vec<HighlightDelta> {
+        let root = match self.parser.root_node() {
+            Some(r) => r,
+            None => return vec![],
+        };
+
+        if self.parser.is_first_parse() {
+            self.highlight_engine.full_repaint(
+                &self.source_bytes,
+                root,
+                "lua",
+                tree_sitter_lua::LANGUAGE.into(),
+            )
+        } else {
+            let changed = self.parser.changed_ranges();
+            self.highlight_engine.repaint_ranges(
+                &self.source_bytes,
+                root,
+                "lua",
+                tree_sitter_lua::LANGUAGE.into(),
+                &changed,
+            )
+        }
     }
 }
 
@@ -98,19 +132,19 @@ impl RuntimeState {
         state.set_text(text);
     }
 
-    pub fn apply_change(&mut self, change: &EditorEvent) -> bool {
+    pub fn apply_change(&mut self, change: &EditorEvent) -> Option<Vec<HighlightDelta>> {
         match change {
             EditorEvent::Change { buffer_id, start_byte, end_byte, text } => {
                 let id = if *buffer_id == 0 { self.current_buffer_id } else { *buffer_id };
                 let state = self.buffers.entry(id).or_insert_with(BufferState::new);
                 state.apply_change(*start_byte, *end_byte, text);
-                true
+                Some(state.compute_highlights())
             }
             EditorEvent::Reload { buffer_id, text } => {
                 let id = if *buffer_id == 0 { self.current_buffer_id } else { *buffer_id };
                 let state = self.buffers.entry(id).or_insert_with(BufferState::new);
                 state.set_text(text);
-                true
+                Some(state.compute_highlights())
             }
             EditorEvent::Save { buffer_id } => {
                 let id = if *buffer_id == 0 { self.current_buffer_id } else { *buffer_id };
@@ -118,9 +152,9 @@ impl RuntimeState {
                     state.is_dirty = false;
                     state.dirty_regions.clear();
                 }
-                true
+                None
             }
-            _ => false,
+            _ => None,
         }
     }
 
@@ -135,12 +169,12 @@ impl RuntimeState {
         };
 
         if let Some(root) = state.parser.root_node() {
-            let source = state.buffer.to_string();
+            let source = &state.source_bytes;
             state.highlight_engine.apply_highlights(
-                root, 
-                source.as_bytes(), 
-                "lua", 
-                tree_sitter_lua::LANGUAGE.into()
+                root,
+                source,
+                "lua",
+                tree_sitter_lua::LANGUAGE.into(),
             )
         } else {
             Vec::new()

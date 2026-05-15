@@ -5,6 +5,8 @@ local job_id = nil
 local stdout_buffer = ""
 M.notifications = {}
 local notification_id = 0
+local attached_buffers = {}
+M.hl_ns = vim.api.nvim_create_namespace("xylem")
 
 local function generate_id()
     notification_id = notification_id + 1
@@ -27,7 +29,7 @@ function M.start()
         binary_path,
         "--rpc",
     }, {
-        rpc = false, -- We handle our own RPC format
+        rpc = false,
         stdout_buffered = false,
         stderr = "pipe",
 
@@ -37,22 +39,21 @@ function M.start()
                 while true do
                     local header_end = stdout_buffer:find("\r\n\r\n")
                     if not header_end then break end
-                    
+
                     local header = stdout_buffer:sub(1, header_end - 1)
                     local content_length = header:match("Content%-Length: (%d+)")
-                    
+
                     if not content_length then
-                        -- Try to find next header or just clear if malformed
                         stdout_buffer = stdout_buffer:sub(header_end + 4)
                     else
                         content_length = tonumber(content_length)
                         if #stdout_buffer < header_end + 3 + content_length then
                             break
                         end
-                        
+
                         local body = stdout_buffer:sub(header_end + 4, header_end + 3 + content_length)
                         stdout_buffer = stdout_buffer:sub(header_end + 4 + content_length)
-                        
+
                         local ok, decoded = pcall(vim.json.decode, body)
                         if ok then
                             M.handle_message(decoded)
@@ -114,6 +115,8 @@ function M.handle_message(msg)
         M.notifications[id] = nil
     elseif method == "xylem.highlights" then
         M.apply_highlights(params.buffer_id, params.highlights)
+    elseif method == "xylem.highlights.delta" then
+        M.apply_highlight_delta(params)
     end
 end
 
@@ -159,16 +162,6 @@ end
 function M.setup_autocmds()
     local group = vim.api.nvim_create_augroup("xylem", { clear = true })
 
-    vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
-        group = group,
-        pattern = "*.lua",
-        callback = function(args)
-            local buf_id = args.buf
-            local text = vim.api.nvim_buf_get_lines(buf_id, 0, -1, false)
-            M.notify_change(buf_id, table.concat(text, "\n"))
-        end,
-    })
-
     vim.api.nvim_create_autocmd("BufEnter", {
         group = group,
         pattern = "*.lua",
@@ -191,6 +184,48 @@ function M.attach_buffer(buf_id)
         method = "xylem.attach",
         params = { buffer_id = buf_id },
     })
+
+    if not attached_buffers[buf_id] then
+        attached_buffers[buf_id] = true
+        vim.api.nvim_buf_attach(buf_id, false, {
+            on_bytes = function(_, buf, changedtick, start_row, start_col, old_end_row, old_end_col, new_end_row, new_end_col)
+                local start_byte = vim.api.nvim_buf_get_offset(buf, start_row) + start_col
+                local old_end_byte = vim.api.nvim_buf_get_offset(buf, old_end_row) + old_end_col
+
+                local line_count = new_end_row - start_row + 1
+                local lines = vim.api.nvim_buf_get_lines(buf, start_row, start_row + line_count, false)
+
+                local new_text
+                if line_count == 1 then
+                    local line = lines[1]
+                    local byte_len = #line
+                    new_text = line:sub(start_col + 1, new_end_col)
+                else
+                    local parts = {}
+                    for i, line in ipairs(lines) do
+                        if i == 1 then
+                            table.insert(parts, line:sub(start_col + 1))
+                        elseif i == line_count then
+                            table.insert(parts, line:sub(1, new_end_col))
+                        else
+                            table.insert(parts, line)
+                        end
+                    end
+                    new_text = table.concat(parts, "\n")
+                end
+
+                M.send_message({
+                    method = "xylem.change",
+                    params = {
+                        buffer_id = buf,
+                        start_byte = start_byte,
+                        old_end_byte = old_end_byte,
+                        new_text = new_text,
+                    },
+                })
+            end,
+        })
+    end
 end
 
 function M.detach_buffer(buf_id)
@@ -198,16 +233,7 @@ function M.detach_buffer(buf_id)
         method = "xylem.detach",
         params = { buffer_id = buf_id },
     })
-end
-
-function M.notify_change(buf_id, text)
-    M.send_message({
-        method = "xylem.change",
-        params = {
-            buffer_id = buf_id,
-            text = text,
-        },
-    })
+    attached_buffers[buf_id] = nil
 end
 
 function M.apply_highlights(buf_id, highlights)
@@ -227,6 +253,21 @@ function M.apply_highlights(buf_id, highlights)
             end_pos,
             {}
         )
+    end
+end
+
+function M.apply_highlight_delta(params)
+    local buf = params.buffer_id
+    if not vim.api.nvim_buf_is_loaded(buf) then
+        return
+    end
+
+    for _, delta in ipairs(params.deltas) do
+        vim.api.nvim_buf_clear_namespace(buf, M.hl_ns, delta.line, delta.line + 1)
+        for _, cap in ipairs(delta.captures) do
+            vim.api.nvim_buf_add_highlight(buf, M.hl_ns, cap.hl_group,
+                delta.line, cap.start_col, cap.end_col)
+        end
     end
 end
 

@@ -2,6 +2,7 @@ use xylem::runtime::state::RuntimeState;
 use xylem::editor::events::EditorEvent;
 use xylem::editor::messages::{XylemMessage, ServerCommand};
 
+use std::io::Write;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::RwLock;
@@ -23,26 +24,24 @@ impl XylemServer {
 
     async fn process_stdin(&self) -> anyhow::Result<()> {
         let mut stdin = BufReader::new(stdin());
-        
+
         while self.running.load(Ordering::SeqCst) {
             let mut header = String::new();
             if stdin.read_line(&mut header).await? == 0 { break; }
-            
+
             if header.starts_with("Content-Length: ") {
                 let len: usize = header["Content-Length: ".len()..].trim().parse()?;
-                
-                // Read until the double newline
+
                 let mut next_line = String::new();
-                stdin.read_line(&mut next_line).await?; // Should be \r\n
-                
+                stdin.read_line(&mut next_line).await?;
+
                 let mut body = vec![0u8; len];
                 stdin.read_exact(&mut body).await?;
-                
+
                 if let Ok(msg) = serde_json::from_slice::<serde_json::Value>(&body) {
                     self.handle_message(&msg).await?;
                 }
             } else if !header.trim().is_empty() {
-                // Fallback for line-based JSON if no Content-Length header
                 if let Ok(msg) = serde_json::from_str::<serde_json::Value>(&header) {
                     self.handle_message(&msg).await?;
                 }
@@ -58,14 +57,40 @@ impl XylemServer {
         match method {
             "xylem.change" => {
                 if let Some(p) = params {
-                    let text = p.get("text")
-                        .and_then(|t| t.as_str())
-                        .unwrap_or("");
+                    let buffer_id = p.get("buffer_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let start_byte = p.get("start_byte").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let old_end_byte = p.get("old_end_byte").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+                    let new_text = p.get("new_text").and_then(|t| t.as_str()).unwrap_or("");
 
-                    let _ = self.tx.send(ServerCommand::UpdateState(XylemMessage::Change {
-                        buffer_id: 0,
-                        text: text.to_string(),
-                    })).await;
+                    let event = EditorEvent::Change {
+                        buffer_id,
+                        start_byte,
+                        end_byte: old_end_byte,
+                        text: new_text.to_string(),
+                    };
+
+                    let _ = self.tx.send(ServerCommand::UpdateStateWithReply {
+                        event,
+                        buffer_id,
+                    }).await;
+                }
+            }
+            "xylem.attach" => {
+                if let Some(p) = params {
+                    let buffer_id = p.get("buffer_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let _ = self.tx.send(ServerCommand::UpdateState(XylemMessage::Attach { buffer_id })).await;
+                }
+            }
+            "xylem.detach" => {
+                if let Some(p) = params {
+                    let buffer_id = p.get("buffer_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let _ = self.tx.send(ServerCommand::UpdateState(XylemMessage::Detach { buffer_id })).await;
+                }
+            }
+            "xylem.parse" => {
+                if let Some(p) = params {
+                    let buffer_id = p.get("buffer_id").and_then(|v| v.as_u64()).unwrap_or(0);
+                    let _ = self.tx.send(ServerCommand::UpdateState(XylemMessage::Parse { buffer_id })).await;
                 }
             }
             _ => {}
@@ -94,20 +119,34 @@ async fn main() -> anyhow::Result<()> {
         let (tx, mut rx) = mpsc::channel::<ServerCommand>(100);
         let runtime = Arc::new(RwLock::new(RuntimeState::new()));
         let runtime_clone = runtime.clone();
-        
-        // Spawn command processor
+        let tx_clone = tx.clone();
+
         tokio::spawn(async move {
             while let Some(cmd) = rx.recv().await {
                 match cmd {
                     ServerCommand::UpdateState(msg) => {
-                        if let XylemMessage::Change { buffer_id, text } = msg {
-                            let event = EditorEvent::Reload {
-                                buffer_id,
-                                text,
-                            };
-                            runtime_clone.write().apply_change(&event);
+                        match msg {
+                            XylemMessage::Change { buffer_id, text } => {
+                                let event = EditorEvent::Reload { buffer_id, text };
+                                runtime_clone.write().apply_change(&event);
+                            }
+                            XylemMessage::Attach { buffer_id } => {
+                                runtime_clone.write().set_buffer_id(buffer_id);
+                            }
+                            _ => {}
                         }
                     }
+                    ServerCommand::UpdateStateWithReply { event, buffer_id } => {
+                        let deltas = runtime_clone.write().apply_change(&event);
+                        let version = runtime_clone.read().buffers.get(&buffer_id).map(|b| b.version).unwrap_or(0);
+                        if let Some(deltas) = deltas {
+                            let _ = tx_clone.send(ServerCommand::SendDelta { buffer_id, version, deltas }).await;
+                        }
+                    }
+                    ServerCommand::SendDelta { buffer_id, version, deltas } => {
+                        let _ = send_delta_to_stdout(buffer_id, version, deltas);
+                    }
+                    ServerCommand::Reply { .. } => {}
                     ServerCommand::Shutdown => break,
                 }
             }
@@ -151,5 +190,51 @@ end
             println!("  {}: {}..{}", hl.highlight, hl.start_byte, hl.end_byte);
         }
     }
+    Ok(())
+}
+
+fn send_delta_to_stdout(buffer_id: u64, version: u64, deltas: Vec<xylem::features::highlight::HighlightDelta>) -> Result<(), String> {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    struct DeltaRpc {
+        line: u32,
+        captures: Vec<CaptureRpc>,
+    }
+
+    #[derive(Serialize)]
+    struct CaptureRpc {
+        start_col: u32,
+        end_col: u32,
+        hl_group: String,
+    }
+
+    let rpc_deltas: Vec<DeltaRpc> = deltas.into_iter().map(|d| {
+        DeltaRpc {
+            line: d.line,
+            captures: d.captures.into_iter().map(|c| CaptureRpc {
+                start_col: c.start_col,
+                end_col: c.end_col,
+                hl_group: c.hl_group,
+            }).collect(),
+        }
+    }).collect();
+
+    let msg = serde_json::json!({
+        "method": "xylem.highlights.delta",
+        "params": {
+            "buffer_id": buffer_id,
+            "version": version,
+            "deltas": rpc_deltas,
+        }
+    });
+
+    let body = serde_json::to_string(&msg).map_err(|e| e.to_string())?;
+    let header = format!("Content-Length: {}\r\n\r\n", body.len());
+    let stdout = std::io::stdout();
+    let mut handle = stdout.lock();
+    handle.write_all(header.as_bytes()).map_err(|e| e.to_string())?;
+    handle.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
+    handle.flush().map_err(|e| e.to_string())?;
     Ok(())
 }

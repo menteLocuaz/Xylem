@@ -57,3 +57,16 @@ pub struct ParseResult {
     pub ast: String,
     pub highlights: Vec<HighlightDef>,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HighlightDeltaRpc {
+    pub line: u32,
+    pub captures: Vec<CaptureEntryRpc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CaptureEntryRpc {
+    pub start_col: u32,
+    pub end_col: u32,
+    pub hl_group: String,
+}
