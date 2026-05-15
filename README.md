@@ -1,6 +1,6 @@
 # Xylem - Incremental Parser for Neovim 0.11+
 
-Plugin Lua mínimo que se integra con un parser incremental en Rust via RPC/stdio.
+Minimal Lua plugin that integrates with a Rust-based incremental parser via RPC/stdio. 
 
 ## Arquitectura
 
@@ -13,7 +13,7 @@ JSON via stdin/stdout
    ↓
 Rust runtime (xylem)
    ↓
-Tree-sitter incremental parser
+Tree-sitter incremental parser + Automated Grammar Installer
 ```
 
 ## Estructura del Proyecto
@@ -26,26 +26,20 @@ xylem/
 │   ├── parser/
 │   │   ├── incremental.rs   # Incremental tree-sitter parser
 │   │   ├── diff.rs          # Diff computation para edits
+│   │   ├── registry.rs      # Grammar registry
+│   │   ├── installer.rs     # Async parser installer
 │   │   └── queries.rs       # Tree-sitter query engine
 │   ├── runtime/
 │   │   ├── state.rs         # Buffer state management
-│   │   ├── scheduler.rs     # Task scheduler
-│   │   └── cache.rs         # Query and buffer cache
+│   │   └── ...
 │   ├── editor/
-│   │   ├── events.rs        # Editor events (change, save, etc)
-│   │   ├── buffer.rs        # Buffer abstraction
-│   │   └── rpc.rs           # RPC handler
-│   └── features/
-│       ├── highlight.rs     # Syntax highlighting
-│       └── indent.rs        # Indentation engine
+│   │   ├── events.rs        # Editor events
+│   │   └── rpc_server.rs    # RPC handler
+│   └── ...
 ├── lua/xylem/
-│   ├── init.lua             # Plugin entry point
-│   ├── rpc.lua              # RPC utilities
-│   └── highlights.lua       # Highlight management
-├── plugin/xylem.lua       # Neovim plugin loader
-├── queries/lua/
-│   └── highlights.scm       # Tree-sitter queries para Lua
-└── lazy.lua                 # Lazy.nvim config
+│   ├── init.lua             # Plugin initialization
+│   └── ...
+└── ...
 ```
 
 ## Building
@@ -68,11 +62,22 @@ return {
 }
 ```
 
+## Automated Parser Installation
+
+Xylem replaces `:TSInstall` and `:TSUpdate`. You can manage language grammars directly through the Rust backend.
+
+### API
+- `xylem.install`: Install a language grammar asynchronously.
+  - Arguments: `name`, `repo`, `revision`, `queries`.
+
+The system automatically downloads, compiles, and installs dynamic libraries (`.so`/`.dylib`/`.dll`) into your Neovim data directory (`stdpath("data")/site/xylem/parsers`).
+
 ## Features Implementadas
 
 - [x] Parser incremental con tree-sitter
 - [x] Highlights basicos (Function, Variable, Number, etc)
 - [x] RPC via stdin/stdout
+- [x] Automated Async Grammar Installer
 - [x] Buffer state management
 - [x] Autocmds para TextChanged/TextChangedI
 
