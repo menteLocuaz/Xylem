@@ -1,6 +1,24 @@
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
+#[serde(tag = "method", content = "params")]
+pub enum RpcRequest {
+    #[serde(rename = "xylem.change")]
+    Change {
+        buffer_id: u64,
+        start_byte: usize,
+        old_end_byte: usize,
+        new_text: String,
+    },
+    #[serde(rename = "xylem.attach")]
+    Attach { buffer_id: u64 },
+    #[serde(rename = "xylem.detach")]
+    Detach { buffer_id: u64 },
+    #[serde(rename = "xylem.parse")]
+    Parse { buffer_id: u64 },
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub enum XylemMessage {
     Attach { buffer_id: u64 },
     Detach { buffer_id: u64 },

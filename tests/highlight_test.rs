@@ -1,5 +1,4 @@
 use xylem::runtime::state::RuntimeState;
-use xylem::parser::queries::types::HighlightKind;
 
 #[test]
 fn test_lua_highlighting() {

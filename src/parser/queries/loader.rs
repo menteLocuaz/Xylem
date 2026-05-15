@@ -1,5 +1,5 @@
 use crate::parser::queries::types::QueryType;
-use std::path::{Path, PathBuf};
+use std::path::{ PathBuf};
 use std::sync::Arc;
 use tree_sitter::{Language, Query};
 
