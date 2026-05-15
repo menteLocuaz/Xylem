@@ -1,11 +1,12 @@
-use std::io::Write;
+use std::io::{self, Write};
 use std::process::{ChildStdin, Stdio};
 use std::process::Command;
 use std::sync::Arc;
 use parking_lot::RwLock;
 
 use crate::runtime::state::{RuntimeState, HighlightRange};
-use crate::editor::events::{EditorEvent, HighlightUpdate, HighlightDef};
+use crate::editor::events::{EditorEvent, HighlightUpdate, HighlightDef, HighlightDeltaRpc, CaptureEntryRpc};
+use crate::features::highlight::HighlightDelta;
 
 pub struct RpcHandler {
     child_stdin: Arc<RwLock<Option<ChildStdin>>>,
@@ -34,14 +35,23 @@ impl RpcHandler {
         }
     }
 
-    pub fn send_notification(&self, method: &str, args: String) -> Result<(), String> {
-        let mut stdin = self.child_stdin.write();
-        if let Some(ref mut s) = *stdin {
-            let msg = format!("notification:{}:{}\n", method, args);
-            s.write_all(msg.as_bytes()).map_err(|e| e.to_string())?;
-            s.flush().map_err(|e| e.to_string())?;
-        }
+    pub fn send_json(&self, msg: &serde_json::Value) -> Result<(), String> {
+        let body = serde_json::to_string(msg).map_err(|e| e.to_string())?;
+        let header = format!("Content-Length: {}\r\n\r\n", body.len());
+        let stdout = io::stdout();
+        let mut handle = stdout.lock();
+        handle.write_all(header.as_bytes()).map_err(|e| e.to_string())?;
+        handle.write_all(body.as_bytes()).map_err(|e| e.to_string())?;
+        handle.flush().map_err(|e| e.to_string())?;
         Ok(())
+    }
+
+    pub fn send_notification(&self, method: &str, args: String) -> Result<(), String> {
+        let msg = serde_json::json!({
+            "method": method,
+            "params": serde_json::from_str::<serde_json::Value>(&args).unwrap_or(serde_json::Value::String(args)),
+        });
+        self.send_json(&msg)
     }
 
     pub fn send_highlights(&self, buffer_id: u64, highlights: Vec<HighlightRange>) -> Result<(), String> {
@@ -57,10 +67,38 @@ impl RpcHandler {
         };
 
         let json = serde_json::to_string(&update).map_err(|e| e.to_string())?;
-        self.send_notification("xylem_highlights", json)
+        self.send_notification("xylem.highlights", json)
     }
 
-    pub fn process_event(&self, event: EditorEvent) -> bool {
+    pub fn send_highlight_delta(
+        &self,
+        buffer_id: u64,
+        version: u64,
+        deltas: Vec<HighlightDelta>,
+    ) -> Result<(), String> {
+        let rpc_deltas: Vec<HighlightDeltaRpc> = deltas.into_iter().map(|d| {
+            HighlightDeltaRpc {
+                line: d.line,
+                captures: d.captures.into_iter().map(|c| CaptureEntryRpc {
+                    start_col: c.start_col,
+                    end_col: c.end_col,
+                    hl_group: c.hl_group,
+                }).collect(),
+            }
+        }).collect();
+
+        let msg = serde_json::json!({
+            "method": "xylem.highlights.delta",
+            "params": {
+                "buffer_id": buffer_id,
+                "version": version,
+                "deltas": rpc_deltas,
+            }
+        });
+        self.send_json(&msg)
+    }
+
+    pub fn process_event(&self, event: EditorEvent) -> Option<Vec<HighlightDelta>> {
         self.runtime.write().apply_change(&event)
     }
 
@@ -102,7 +140,10 @@ impl NeovimRpc {
             end_byte,
             text: text.to_string(),
         };
-        self.handler.process_event(event);
+        if let Some(deltas) = self.handler.process_event(event) {
+            let version = self.handler.runtime.read().buffers.get(&buffer_id).map(|b| b.version).unwrap_or(0);
+            let _ = self.handler.send_highlight_delta(buffer_id, version, deltas);
+        }
     }
 
     pub fn get_highlights(&self, buffer_id: u64) {

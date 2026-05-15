@@ -11,5 +11,18 @@ pub enum XylemMessage {
 #[derive(Debug)]
 pub enum ServerCommand {
     UpdateState(XylemMessage),
+    UpdateStateWithReply {
+        event: crate::editor::events::EditorEvent,
+        buffer_id: u64,
+    },
+    SendDelta {
+        buffer_id: u64,
+        version: u64,
+        deltas: Vec<crate::features::highlight::HighlightDelta>,
+    },
+    Reply {
+        buffer_id: u64,
+        deltas: Option<Vec<crate::features::highlight::HighlightDelta>>,
+    },
     Shutdown,
 }
