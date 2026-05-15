@@ -1,41 +1,40 @@
 use std::collections::HashMap;
-use std::num::NonZeroUsize;
 use parking_lot::RwLock;
-use std::sync::Arc;
-use lru::LruCache;
+use std::sync::{Arc, OnceLock};
 use tree_sitter::Query;
+use std::path::Path;
+use std::fs;
 
-pub struct QueryCache {
-    cache: Arc<RwLock<HashMap<String, Arc<Query>>>>,
-    lru: Arc<RwLock<LruCache<String, Arc<Query>>>>,
-    max_size: usize,
-}
+static QUERY_CACHE: OnceLock<RwLock<HashMap<String, Arc<Query>>>> = OnceLock::new();
 
-impl QueryCache {
-    pub fn new(max_size: usize) -> Self {
-        Self {
-            cache: Arc::new(RwLock::new(HashMap::new())),
-            lru: Arc::new(RwLock::new(LruCache::new(
-                NonZeroUsize::new(max_size).unwrap()
-            ))),
-            max_size,
+pub fn get_or_load_query(lang: &str, query_name: &str, scm_path: &Path, fallback: Option<&str>) -> Option<Arc<Query>> {
+    let cache_key = format!("{}:{}", lang, query_name);
+    let cache = QUERY_CACHE.get_or_init(|| RwLock::new(HashMap::new()));
+    
+    // Fast path - read lock
+    {
+        let read_lock = cache.read();
+        if let Some(q) = read_lock.get(&cache_key) {
+            return Some(Arc::clone(q));
         }
     }
+    
+    // Slow path - load and compile
+    let language = match lang {
+        "lua" => tree_sitter_lua::LANGUAGE,
+        _ => return None,
+    };
 
-    pub fn get(&self, key: &str) -> Option<Arc<Query>> {
-        let mut lru = self.lru.write();
-        lru.get(key).map(|q| (*q).clone())
-    }
+    let source = fs::read_to_string(scm_path).ok()
+        .or_else(|| fallback.map(|s| s.to_string()))?;
 
-    pub fn insert(&self, key: String, query: Arc<Query>) {
-        let mut lru = self.lru.write();
-        lru.put(key, query);
-    }
-
-    pub fn clear(&self) {
-        let mut lru = self.lru.write();
-        lru.clear();
-        self.cache.write().clear();
+    if let Ok(query) = Query::new(&language.into(), &source) {
+        let arc_query = Arc::new(query);
+        let mut write_lock = cache.write();
+        write_lock.insert(cache_key, Arc::clone(&arc_query));
+        Some(arc_query)
+    } else {
+        None
     }
 }
 

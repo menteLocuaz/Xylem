@@ -1,5 +1,6 @@
 use ropey::Rope;
 
+/*
 pub struct DiffResult {
     pub start_byte: usize,
     pub old_end_byte: usize,
@@ -37,6 +38,7 @@ pub fn compute_diff(old_text: &Rope, new_text: &str) -> Option<DiffResult> {
         new_text: new_text[start..new_len].to_string(),
     })
 }
+*/
 
 pub fn compute_edit_positions(
     text: &Rope,

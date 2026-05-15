@@ -1,17 +1,20 @@
 use crate::parser::queries::QueryEngine;
 use crate::runtime::state::HighlightRange;
+use crate::runtime::sync::SyncManager;
 use tree_sitter::Node;
 use parking_lot::RwLock;
 use std::sync::Arc;
 
 pub struct HighlightEngine {
     custom_queries: Arc<RwLock<Vec<String>>>,
+    sync_manager: SyncManager,
 }
 
 impl HighlightEngine {
     pub fn new() -> Self {
         Self {
             custom_queries: Arc::new(RwLock::new(Vec::new())),
+            sync_manager: SyncManager::new().expect("Failed to initialize SyncManager"),
         }
     }
 
@@ -23,11 +26,11 @@ impl HighlightEngine {
         let mut highlights = Vec::new();
         let language = tree_sitter_lua::LANGUAGE;
 
-        let default_query = r#"
-            (function_declaration
-              name: (identifier) @function)
-            (function_call
-              name: (identifier) @function)
+        // Load dynamic query via cache
+        let query_path = self.sync_manager.get_query_path("lua", "highlights");
+        let fallback = r#"
+            (function_declaration name: (identifier) @function)
+            (function_call name: (identifier) @function)
             (identifier) @variable
             (number) @number
             (string) @string
@@ -36,7 +39,7 @@ impl HighlightEngine {
             (["local" "require" "return" "if" "then" "else" "end"] @keyword)
         "#;
 
-        if let Ok(query) = tree_sitter::Query::new(&language.into(), default_query) {
+        if let Some(query) = crate::runtime::cache::get_or_load_query("lua", "highlights", &query_path, Some(fallback)) {
             let matches = QueryEngine::execute(&query, root, source);
             self.process_matches(&matches, &mut highlights);
         }

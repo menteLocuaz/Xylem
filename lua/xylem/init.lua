@@ -2,8 +2,14 @@ local M = {}
 
 local uv = vim.uv
 local job_id = nil
-local rpc_channel = nil
-local event_handlers = {}
+local stdout_buffer = ""
+M.notifications = {}
+local notification_id = 0
+
+local function generate_id()
+    notification_id = notification_id + 1
+    return "sync_" .. notification_id
+end
 
 function M.start()
     if job_id then
@@ -21,15 +27,38 @@ function M.start()
         binary_path,
         "--rpc",
     }, {
-        rpc = true,
+        rpc = false, -- We handle our own RPC format
         stdout_buffered = false,
         stderr = "pipe",
 
         on_stdout = function(_, data)
             if data then
-                for _, line in ipairs(data) do
-                    if line ~= "" then
-                        vim.notify("[xylem] " .. line, vim.log.levels.INFO)
+                stdout_buffer = stdout_buffer .. table.concat(data, "\n")
+                while true do
+                    local header_end = stdout_buffer:find("\r\n\r\n")
+                    if not header_end then break end
+                    
+                    local header = stdout_buffer:sub(1, header_end - 1)
+                    local content_length = header:match("Content%-Length: (%d+)")
+                    
+                    if not content_length then
+                        -- Try to find next header or just clear if malformed
+                        stdout_buffer = stdout_buffer:sub(header_end + 4)
+                    else
+                        content_length = tonumber(content_length)
+                        if #stdout_buffer < header_end + 3 + content_length then
+                            break
+                        end
+                        
+                        local body = stdout_buffer:sub(header_end + 4, header_end + 3 + content_length)
+                        stdout_buffer = stdout_buffer:sub(header_end + 4 + content_length)
+                        
+                        local ok, decoded = pcall(vim.json.decode, body)
+                        if ok then
+                            M.handle_message(decoded)
+                        else
+                            vim.notify("[xylem] Failed to decode JSON: " .. body, vim.log.levels.ERROR)
+                        end
                     end
                 end
             end
@@ -47,7 +76,6 @@ function M.start()
 
         on_exit = function(_, code)
             job_id = nil
-            rpc_channel = nil
             if code ~= 0 then
                 vim.notify("[xylem] Process exited with code " .. code, vim.log.levels.ERROR)
             end
@@ -55,11 +83,6 @@ function M.start()
     })
 
     if job_id > 0 then
-        rpc_channel = vim.fn.jobstart({
-            binary_path,
-        }, {
-            rpc = true,
-        })
         vim.notify("[xylem] Started successfully", vim.log.levels.INFO)
         M.setup_autocmds()
     else
@@ -67,20 +90,76 @@ function M.start()
     end
 end
 
+function M.handle_message(msg)
+    local method = msg.method
+    local id = msg.id
+    local params = msg.params
+
+    if method == "xylem.sync.result" and id and M.notifications[id] then
+        local cb = M.notifications[id].callback
+        if cb then
+            cb(params)
+        end
+        M.notifications[id] = nil
+    elseif method == "xylem.sync.progress" then
+        local cb = M.notifications[id] and M.notifications[id].on_progress
+        if cb then
+            cb(params)
+        end
+    elseif method == "xylem.sync.complete" then
+        local cb = M.notifications[id] and M.notifications[id].on_complete
+        if cb then
+            cb(params)
+        end
+        M.notifications[id] = nil
+    elseif method == "xylem.highlights" then
+        M.apply_highlights(params.buffer_id, params.highlights)
+    end
+end
+
+function M.send_message(msg)
+    if not job_id or job_id <= 0 then
+        return
+    end
+
+    local encoded = vim.json.encode(msg)
+    local header = string.format("Content-Length: %d\r\n\r\n", #encoded)
+    vim.fn.chansend(job_id, header .. encoded)
+end
+
+function M.sync(opts)
+    opts = opts or {}
+    local lang = opts.lang or "lua"
+    local callback = opts.callback
+
+    local id = generate_id()
+    M.notifications[id] = { callback = callback }
+
+    M.send_message({
+        method = "xylem.sync",
+        id = id,
+        params = { lang = lang },
+    })
+end
+
+function M.sync_all(opts)
+    opts = opts or {}
+    local on_progress = opts.on_progress
+    local on_complete = opts.on_complete
+
+    local id = generate_id()
+    M.notifications[id] = { on_progress = on_progress, on_complete = on_complete }
+
+    M.send_message({
+        method = "xylem.sync_all",
+        id = id,
+    })
+end
+
 function M.setup_autocmds()
     local group = vim.api.nvim_create_augroup("xylem", { clear = true })
 
-    vim.api.nvim_create_autocmd("TextChangedI", {
-        group = group,
-        pattern = "*.lua",
-        callback = function(args)
-            local buf_id = args.buf
-            local text = vim.api.nvim_buf_get_lines(buf_id, 0, -1, false)
-            M.notify_change(buf_id, table.concat(text, "\n"))
-        end,
-    })
-
-    vim.api.nvim_create_autocmd("TextChanged", {
+    vim.api.nvim_create_autocmd({ "TextChanged", "TextChangedI" }, {
         group = group,
         pattern = "*.lua",
         callback = function(args)
@@ -108,39 +187,27 @@ function M.setup_autocmds()
 end
 
 function M.attach_buffer(buf_id)
-    if not job_id or job_id <= 0 then
-        return
-    end
-
-    vim.fn.chansend(job_id, vim.json.encode({
+    M.send_message({
         method = "xylem.attach",
         params = { buffer_id = buf_id },
-    }) .. "\n")
+    })
 end
 
 function M.detach_buffer(buf_id)
-    if not job_id or job_id <= 0 then
-        return
-    end
-
-    vim.fn.chansend(job_id, vim.json.encode({
+    M.send_message({
         method = "xylem.detach",
         params = { buffer_id = buf_id },
-    }) .. "\n")
+    })
 end
 
 function M.notify_change(buf_id, text)
-    if not job_id or job_id <= 0 then
-        return
-    end
-
-    vim.fn.chansend(job_id, vim.json.encode({
+    M.send_message({
         method = "xylem.change",
         params = {
             buffer_id = buf_id,
             text = text,
         },
-    }) .. "\n")
+    })
 end
 
 function M.apply_highlights(buf_id, highlights)
@@ -184,7 +251,6 @@ function M.stop()
     if job_id and job_id > 0 then
         vim.fn.jobstop(job_id)
         job_id = nil
-        rpc_channel = nil
         vim.notify("[xylem] Stopped", vim.log.levels.INFO)
     end
 end
