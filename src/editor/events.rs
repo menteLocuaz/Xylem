@@ -42,11 +42,13 @@ pub struct HighlightUpdate {
     pub highlights: Vec<HighlightDef>,
 }
 
+use crate::parser::queries::types::HighlightKind;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HighlightDef {
     pub start_byte: usize,
     pub end_byte: usize,
-    pub hl_group: String,
+    pub hl_group: HighlightKind,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -1,57 +1,12 @@
-mod parser;
-mod runtime;
-mod editor;
-mod features;
-mod logger;
+use xylem::runtime::state::RuntimeState;
+use xylem::editor::events::EditorEvent;
+use xylem::editor::messages::{XylemMessage, ServerCommand};
 
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
-use std::sync::OnceLock;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use parking_lot::RwLock;
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader, stdin, stdout};
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader, stdin};
 use tokio::sync::mpsc;
-
-use runtime::state::RuntimeState;
-use runtime::sync::{SyncResult};
-use editor::events::EditorEvent;
-use editor::messages::{XylemMessage, ServerCommand};
-
-static STDOUT_MUTEX: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
-
-async fn send_json(msg: &serde_json::Value) {
-    let guard = STDOUT_MUTEX.get_or_init(|| tokio::sync::Mutex::new(())).lock().await;
-    let body = serde_json::to_string(msg).unwrap_or_default();
-    let header = format!("Content-Length: {}\r\n\r\n", body.len());
-    let mut stdout = stdout();
-    let _ = stdout.write_all(header.as_bytes()).await;
-    let _ = stdout.write_all(body.as_bytes()).await;
-    let _ = stdout.flush().await;
-    drop(guard);
-}
-
-fn build_result(id: &str, lang: &str, result: &SyncResult) -> serde_json::Value {
-    serde_json::json!({
-        "method": "xylem.sync.result",
-        "id": id,
-        "params": {
-            "lang": lang,
-            "success": result.success,
-            "path": result.path,
-            "message": result.message,
-        }
-    })
-}
-
-fn build_complete(id: &str, total: u32, failed_langs: &[String]) -> serde_json::Value {
-    serde_json::json!({
-        "method": "xylem.sync.complete",
-        "id": id,
-        "params": {
-            "total": total,
-            "failed": failed_langs.len(),
-            "failed_langs": failed_langs,
-        }
-    })
-}
 
 struct XylemServer {
     tx: mpsc::Sender<ServerCommand>,
@@ -118,46 +73,6 @@ impl XylemServer {
         Ok(())
     }
 
-
-
-    async fn send_highlights(&self, buffer_id: u64, highlights: Vec<runtime::state::HighlightRange>) -> anyhow::Result<()> {
-        let hl_json: Vec<serde_json::Value> = highlights.iter().map(|h| {
-            serde_json::json!({
-                "start_byte": h.start_byte,
-                "end_byte": h.end_byte,
-                "hl_group": h.highlight,
-            })
-        }).collect();
-
-        let response = serde_json::json!({
-            "method": "xylem.highlights",
-            "params": {
-                "buffer_id": buffer_id,
-                "highlights": hl_json,
-            }
-        });
-
-        self.send_message(&response).await
-    }
-
-    async fn send_response(&self, method: &str, result: String) -> anyhow::Result<()> {
-        let response = serde_json::json!({
-            "method": method,
-            "result": result,
-        });
-        self.send_message(&response).await
-    }
-
-    async fn send_message(&self, msg: &serde_json::Value) -> anyhow::Result<()> {
-        let body = serde_json::to_string(msg)?;
-        let header = format!("Content-Length: {}\r\n\r\n", body.len());
-        let mut stdout = stdout();
-        stdout.write_all(header.as_bytes()).await?;
-        stdout.write_all(body.as_bytes()).await?;
-        stdout.flush().await?;
-        Ok(())
-    }
-
     fn shutdown(&self) {
         self.running.store(false, Ordering::SeqCst);
     }
@@ -170,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
     let is_sync = args.contains(&"--sync".to_string());
 
     if is_sync {
-        let manager = runtime::sync::SyncManager::new()?;
+        let manager = xylem::runtime::sync::SyncManager::new()?;
         manager.sync_all().await?;
         return Ok(());
     }
