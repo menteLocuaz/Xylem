@@ -10,7 +10,7 @@ use crate::features::highlight::HighlightDelta;
 
 pub struct RpcHandler {
     child_stdin: Arc<RwLock<Option<ChildStdin>>>,
-    runtime: Arc<RwLock<RuntimeState>>,
+    runtime: Arc<RuntimeState>,
     running: Arc<RwLock<bool>>,
 }
 
@@ -25,7 +25,7 @@ impl RpcHandler {
 
         let child_stdin = child.stdin.take().unwrap();
 
-        let runtime = Arc::new(RwLock::new(RuntimeState::new()));
+        let runtime = Arc::new(RuntimeState::new());
         let is_running = Arc::new(RwLock::new(true));
 
         Self {
@@ -82,7 +82,7 @@ impl RpcHandler {
                 captures: d.captures.into_iter().map(|c| CaptureEntryRpc {
                     start_col: c.start_col,
                     end_col: c.end_col,
-                    hl_group: c.hl_group,
+                    hl_group: c.hl_group.to_string(),
                 }).collect(),
             }
         }).collect();
@@ -99,15 +99,15 @@ impl RpcHandler {
     }
 
     pub fn process_event(&self, event: EditorEvent) -> Option<Vec<HighlightDelta>> {
-        self.runtime.write().apply_change(&event)
+        self.runtime.apply_change(&event)
     }
 
     pub fn get_highlights(&self) -> Vec<HighlightRange> {
-        self.runtime.read().get_highlights()
+        self.runtime.get_highlights()
     }
 
     pub fn set_text(&self, text: &str) {
-        self.runtime.write().set_text(text);
+        self.runtime.set_text(text);
     }
 
     pub fn is_running(&self) -> bool {
@@ -141,7 +141,7 @@ impl NeovimRpc {
             text: text.to_string(),
         };
         if let Some(deltas) = self.handler.process_event(event) {
-            let version = self.handler.runtime.read().buffers.get(&buffer_id).map(|b| b.version).unwrap_or(0);
+            let version = self.handler.runtime.buffers.get(&buffer_id).map(|b| b.read().version).unwrap_or(0);
             let _ = self.handler.send_highlight_delta(buffer_id, version, deltas);
         }
     }

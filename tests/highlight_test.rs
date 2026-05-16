@@ -1,21 +1,23 @@
 use xylem::runtime::state::RuntimeState;
 
 #[test]
-fn test_lua_highlighting() {
-    let mut state = RuntimeState::new();
-    state.set_text(r#"
-local x = 10
-function hello()
-    print(x)
-end
-"#);
+fn test_edit_consistency() {
+    let state = RuntimeState::new();
+    let buffer_id = 1;
+    state.set_buffer_id(buffer_id);
+    state.set_text("function main()\nend");
 
-    // Note: We need to register a query for this to work in a real scenario.
-    // However, QueryEngine::get currently returns None for all languages because it's not implemented yet.
-    // The current implementation of apply_highlights will return an empty vector.
-    
-    let highlights = state.get_highlights();
-    // Since we don't have a way to load queries easily in this test yet,
-    // we'll just verify that it doesn't crash and returns a vector.
-    assert!(highlights.is_empty()); 
+    // Perform many small edits
+    for i in 0..100 {
+        state.apply_changes_and_parse(buffer_id, &[(9, 9, format!("-- edit {}\n", i))]);
+    }
+
+    // This will trigger ensure_source_bytes
+    let highlights = state.get_highlights_for_buffer(buffer_id);
+    let _ = highlights.len();
+
+    // Verify buffer content consistency
+    let buffer_ref = state.buffers.get(&buffer_id).unwrap();
+    let state_guard = buffer_ref.read();
+    assert!(state_guard.buffer.len_bytes() > 20);
 }

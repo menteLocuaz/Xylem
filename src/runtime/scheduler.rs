@@ -2,7 +2,7 @@ use std::collections::BinaryHeap;
 use std::collections::HashMap;
 use std::cmp::Ordering;
 use tokio::sync::mpsc;
-use tokio::time::{sleep, Duration, Instant};
+use tokio::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Priority {
@@ -67,13 +67,13 @@ impl Scheduler {
         }
     }
 
-    pub async fn tick(&mut self) {
-        let deadline = Duration::from_millis(Self::DEBOUNCE_MS);
+    pub async fn tick(&mut self) -> Option<Instant> {
+        let debounce_duration = Duration::from_millis(Self::DEBOUNCE_MS);
         let now = Instant::now();
 
         let expired: Vec<u64> = self.pending
             .iter()
-            .filter(|(_, (_, t))| now.duration_since(*t) >= deadline)
+            .filter(|(_, (_, t))| now.duration_since(*t) >= debounce_duration)
             .map(|(id, _)| *id)
             .collect();
 
@@ -90,7 +90,7 @@ impl Scheduler {
             }
         }
 
-        sleep(Duration::from_millis(10)).await;
+        self.pending.values().map(|(_, t)| *t + debounce_duration).min()
     }
 }
 
@@ -101,11 +101,21 @@ pub async fn scheduler_loop(
     let mut scheduler = Scheduler::new(job_tx);
 
     loop {
-        tokio::select! {
-            Some(job) = schedule_rx.recv() => {
-                scheduler.push_edit(job);
+        let next_deadline = scheduler.tick().await;
+        
+        if let Some(deadline) = next_deadline {
+            tokio::select! {
+                Some(job) = schedule_rx.recv() => {
+                    scheduler.push_edit(job);
+                }
+                _ = tokio::time::sleep_until(deadline) => {}
             }
-            _ = scheduler.tick() => {}
+        } else {
+            if let Some(job) = schedule_rx.recv().await {
+                scheduler.push_edit(job);
+            } else {
+                break;
+            }
         }
     }
 }
