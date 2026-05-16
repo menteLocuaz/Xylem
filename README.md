@@ -1,90 +1,98 @@
-# Xylem - Incremental Parser for Neovim 0.11+
+# Xylem: Incremental Parser for Neovim 0.11+
 
-Minimal Lua plugin that integrates with a Rust-based incremental parser via RPC/stdio. 
+Xylem is a high-performance, Rust-powered incremental parser for Neovim. It offloads heavy Tree-sitter analysis and query execution to a dedicated Rust process, ensuring the main Neovim thread remains responsive even during complex syntax highlighting and analysis tasks.
 
-## Arquitectura
+## Key Features
 
-```
-Neovim 0.11
-   ↓
-Lua plugin (init.lua)
-   ↓
-JSON via stdin/stdout
-   ↓
-Rust runtime (xylem)
-   ↓
-Tree-sitter incremental parser + Automated Grammar Installer
-```
+- **🚀 Rust-Powered Performance:** Core parsing and query logic implemented in Rust for maximum efficiency.
+- **🔄 True Incrementalism:** Uses Tree-sitter's incremental parsing to only update what has changed.
+- **📡 Async RPC Bridge:** Communicates via a low-latency JSON RPC protocol over standard streams.
+- **📦 Automated Grammar Management:** Integrated async installer that replaces standard `nvim-treesitter` workflows.
+- **🧩 Minimal Neovim Footprint:** A slim Lua plugin handles the frontend, while Rust handles the heavy lifting.
 
-## Estructura del Proyecto
+---
 
-```
-xylem/
-├── Cargo.toml
-├── src/
-│   ├── main.rs              # Entry point + RPC server
-│   ├── parser/
-│   │   ├── incremental.rs   # Incremental tree-sitter parser
-│   │   ├── diff.rs          # Diff computation para edits
-│   │   ├── registry.rs      # Grammar registry
-│   │   ├── installer.rs     # Async parser installer
-│   │   └── queries.rs       # Tree-sitter query engine
-│   ├── runtime/
-│   │   ├── state.rs         # Buffer state management
-│   │   └── ...
-│   ├── editor/
-│   │   ├── events.rs        # Editor events
-│   │   └── rpc_server.rs    # RPC handler
-│   └── ...
-├── lua/xylem/
-│   ├── init.lua             # Plugin initialization
-│   └── ...
-└── ...
+## Architecture
+
+Xylem operates as a bridge between Neovim and the Tree-sitter ecosystem:
+
+```mermaid
+graph TD
+    A[Neovim 0.11+] -- RPC/JSON --> B(Lua Frontend)
+    B -- stdio --> C(Rust Backend)
+    C --> D{Tree-sitter Engine}
+    D --> E[Incremental Parser]
+    D --> F[Query Engine]
+    C --> G[Grammar Installer]
 ```
 
-## Building
+The Rust backend manages the document state using efficient data structures (like ropes) and performs asynchronous query execution, sending results back to Neovim for rendering via extmarks.
 
-```bash
-cargo build --release
-```
+---
 
-## Usage con Lazy.nvim
+## Getting Started
 
-En tu config de plugins (~/.config/nvim/lua/plugins/xylem.lua):
+### Prerequisites
+
+- **Neovim 0.11+** (Nightly or stable release)
+- **Rust Toolchain** (Stable)
+
+### Installation
+
+Using [lazy.nvim](https://github.com/folke/lazy.nvim):
 
 ```lua
 return {
-    dir = "~/projects/xylem",
-    lazy = false,
+    "arancamon/xylem", -- Or your local path
+    build = "cargo build --release",
     config = function()
         require("xylem").start()
     end,
 }
 ```
 
-## Automated Parser Installation
+### Manual Build
+If you are developing or prefer a manual build:
+```bash
+cargo build --release
+```
+The plugin expects the binary to be at `./target/release/xylem`.
 
-Xylem replaces `:TSInstall` and `:TSUpdate`. You can manage language grammars directly through the Rust backend.
+---
 
-### API
-- `xylem.install`: Install a language grammar asynchronously.
-  - Arguments: `name`, `repo`, `revision`, `queries`.
+## Grammar and Query Management
 
-The system automatically downloads, compiles, and installs dynamic libraries (`.so`/`.dylib`/`.dll`) into your Neovim data directory (`stdpath("data")/site/xylem/parsers`).
+Xylem includes a built-in management system for Tree-sitter grammars and queries. It provides several commands for installation and synchronization:
 
-## Features Implementadas
+- `:XylemInstall <lang>`: Install a specific grammar.
+- `:XylemSync`: Perform a bulk synchronization of supported grammars.
+- `:XylemInfo`: View backend status and active buffers.
 
-- [x] Parser incremental con tree-sitter
-- [x] Highlights basicos (Function, Variable, Number, etc)
-- [x] RPC via stdin/stdout
-- [x] Automated Async Grammar Installer
-- [x] Buffer state management
-- [x] Autocmds para TextChanged/TextChangedI
+For detailed command usage and technical details, see the [Command and Grammar Reference](docs/COMMAND-REFERENCE.md).
 
-## Features Pendientes
+---
 
-- [ ] Incremental real (InputEdit con posiciones correctas)
-- [ ] Extmarks para highlights reales en Neovim
-- [ ] Query cache
-- [ ] Scheduler async
-- [ ] Rope incremental (evitar to_string())
+## Project Structure
+
+- `src/`: Rust backend implementation (RPC server, parser, runtime).
+- `lua/xylem/`: Neovim Lua plugin (initialization, RPC utilities, highlights).
+- `queries/`: Tree-sitter query files (`.scm`) for supported languages.
+- `docs/`: In-depth documentation and technical specifications.
+
+---
+
+## Roadmap
+
+- [x] Basic incremental parsing
+- [x] Async Grammar Installer
+- [x] Basic syntax highlighting
+- [ ] Full `InputEdit` position synchronization
+- [ ] Advanced query result caching
+- [ ] Extmark-based highlight rendering
+- [ ] File monitoring for query auto-reloading
+
+---
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

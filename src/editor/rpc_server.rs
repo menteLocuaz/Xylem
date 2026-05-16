@@ -8,8 +8,9 @@ use tokio::io::{AsyncReadExt, stdin};
 use tokio::sync::mpsc;
 
 pub enum DecodedMessage {
-    Request(RpcRequest),
-    Response,
+    Request { msgid: u64, request: RpcRequest },
+    Response { msgid: u64 },
+    Notification { request: RpcRequest },
 }
 
 pub struct XylemServer {
@@ -37,11 +38,15 @@ impl XylemServer {
 
             loop {
                 match try_decode_rpc_message(&buf) {
-                    Ok(Some((consumed, DecodedMessage::Request(request)))) => {
+                    Ok(Some((consumed, DecodedMessage::Request { msgid, request }))) => {
                         buf.drain(..consumed);
-                        self.handle_request(request).await?;
+                        self.handle_request(msgid, request).await?;
                     }
-                    Ok(Some((consumed, DecodedMessage::Response))) => {
+                    Ok(Some((consumed, DecodedMessage::Notification { request }))) => {
+                        buf.drain(..consumed);
+                        self.handle_request(0, request).await?;
+                    }
+                    Ok(Some((consumed, DecodedMessage::Response { .. }))) => {
                         buf.drain(..consumed);
                     }
                     Ok(None) => break,
@@ -56,7 +61,7 @@ impl XylemServer {
         Ok(())
     }
 
-    pub async fn handle_request(&self, request: RpcRequest) -> anyhow::Result<()> {
+    pub async fn handle_request(&self, msgid: u64, request: RpcRequest) -> anyhow::Result<()> {
         match request {
             RpcRequest::Change { buffer_id, start_byte, old_end_byte, new_text } => {
                 let event = EditorEvent::Change {
@@ -87,6 +92,18 @@ impl XylemServer {
                     }
                 });
             }
+            RpcRequest::SyncAll => {
+                let _ = self.tx.send(ServerCommand::UpdateState(XylemMessage::SyncAll)).await;
+            }
+            RpcRequest::SyncOne { name } => {
+                let _ = self.tx.send(ServerCommand::UpdateState(XylemMessage::SyncOne { name })).await;
+            }
+            RpcRequest::Info => {
+                let _ = self.tx.send(ServerCommand::Info { msgid }).await;
+            }
+            RpcRequest::GetGrammars => {
+                let _ = self.tx.send(ServerCommand::GetGrammars { msgid }).await;
+            }
         }
         Ok(())
     }
@@ -103,12 +120,16 @@ fn try_decode_rpc_message(buf: &[u8]) -> anyhow::Result<Option<(usize, DecodedMe
             let consumed = buf.len() - slice.len();
             let msg = MsgpackRpcIn::from_value(value)?;
             match msg {
-                MsgpackRpcIn::Request { .. } | MsgpackRpcIn::Notification { .. } => {
+                MsgpackRpcIn::Request { msgid, .. } => {
                     let request = msg.into_rpc_request()?;
-                    Ok(Some((consumed, DecodedMessage::Request(request))))
+                    Ok(Some((consumed, DecodedMessage::Request { msgid, request })))
                 }
-                MsgpackRpcIn::Response { .. } => {
-                    Ok(Some((consumed, DecodedMessage::Response)))
+                MsgpackRpcIn::Notification { .. } => {
+                    let request = msg.into_rpc_request()?;
+                    Ok(Some((consumed, DecodedMessage::Notification { request })))
+                }
+                MsgpackRpcIn::Response { msgid, .. } => {
+                    Ok(Some((consumed, DecodedMessage::Response { msgid })))
                 }
             }
         }

@@ -22,6 +22,23 @@ function M.setup()
             M.attach(ev.buf)
         end,
     })
+
+    -- 3. Registrar comandos
+    vim.api.nvim_create_user_command("XylemInstall", function(opts)
+        M.sync(opts.args ~= "" and opts.args or nil)
+    end, { nargs = "?", complete = M.complete_langs })
+
+    vim.api.nvim_create_user_command("XylemUpdate", function(opts)
+        M.sync(opts.args ~= "" and opts.args or nil)
+    end, { nargs = "?", complete = M.complete_langs })
+
+    vim.api.nvim_create_user_command("XylemSync", function()
+        M.sync()
+    end, {})
+
+    vim.api.nvim_create_user_command("XylemInfo", function()
+        M.info()
+    end, {})
 end
 
 function M.attach(buf)
@@ -32,18 +49,13 @@ function M.attach(buf)
     attached[buf] = true
     vim.rpcnotify(job_id, "xylem.attach", { buffer_id = buf })
 
-    -- 3. Enviar eventos
+    -- Enviar eventos
     vim.api.nvim_buf_attach(buf, false, {
         on_bytes = function(_, b, _, s_row, s_col, s_byte, _, _, o_byte, n_row, n_col, _)
-            -- Diferir la captura para no bloquear el event loop principal
             vim.schedule(function()
                 if not vim.api.nvim_buf_is_valid(b) then return end
-
-                -- Cálculo robusto de coordenadas finales para nvim_buf_get_text
                 local e_row = s_row + n_row
                 local e_col = n_row == 0 and (s_col + n_col) or n_col
-
-                -- Captura quirúrgica del texto nuevo
                 local text = table.concat(vim.api.nvim_buf_get_text(b, s_row, s_col, e_row, e_col, {}), "\n")
 
                 vim.rpcnotify(job_id, "xylem.change", {
@@ -63,12 +75,34 @@ function M.attach(buf)
     })
 end
 
+function M.sync(lang)
+    if not job_id or job_id <= 0 then return end
+    if lang then
+        vim.rpcnotify(job_id, "xylem.sync_one", { name = lang })
+    else
+        vim.rpcnotify(job_id, "xylem.sync_all", {})
+    end
+end
+
+function M.info()
+    if not job_id or job_id <= 0 then return end
+    local res = vim.rpcrequest(job_id, "xylem.info", {})
+    print(res)
+end
+
+function M.complete_langs(arg_lead)
+    if not job_id or job_id <= 0 then return {} end
+    local langs = vim.rpcrequest(job_id, "xylem.get_grammars", {})
+    return vim.tbl_filter(function(l)
+        return l:find(arg_lead) ~= nil
+    end, langs)
+end
+
 function M.apply_highlight_delta(params)
     local buf = params.buffer_id
     if not vim.api.nvim_buf_is_valid(buf) then return end
 
     for _, delta in ipairs(params.deltas) do
-        -- Uso eficiente del namespace a nivel de módulo
         vim.api.nvim_buf_clear_namespace(buf, ns, delta.line, delta.line + 1)
         for _, cap in ipairs(delta.captures) do
             vim.api.nvim_buf_add_highlight(buf, ns, cap.hl_group, delta.line, cap.start_col, cap.end_col)
