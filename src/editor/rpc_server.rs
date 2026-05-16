@@ -1,11 +1,16 @@
-use crate::editor::messages::{ServerCommand, XylemMessage, RpcRequest};
+use crate::editor::messages::{MsgpackRpcIn, ServerCommand, XylemMessage, RpcRequest};
 use crate::editor::events::EditorEvent;
 use crate::parser::installer::ParserInstaller;
 use crate::parser::registry::GrammarSpec;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::io::{AsyncBufReadExt, BufReader, stdin};
+use tokio::io::{AsyncReadExt, stdin};
 use tokio::sync::mpsc;
+
+pub enum DecodedMessage {
+    Request(RpcRequest),
+    Response,
+}
 
 pub struct XylemServer {
     tx: mpsc::Sender<ServerCommand>,
@@ -21,27 +26,30 @@ impl XylemServer {
     }
 
     pub async fn process_stdin(&self) -> anyhow::Result<()> {
-        let mut stdin = BufReader::new(stdin());
+        let mut stdin = stdin();
+        let mut buf = Vec::new();
+        let mut temp = [0u8; 512];
 
         while self.running.load(Ordering::SeqCst) {
-            let mut header = String::new();
-            if stdin.read_line(&mut header).await? == 0 { break; }
+            let n = stdin.read(&mut temp).await?;
+            if n == 0 { break; }
+            buf.extend_from_slice(&temp[..n]);
 
-            if header.starts_with("Content-Length: ") {
-                let len: usize = header["Content-Length: ".len()..].trim().parse()?;
-
-                let mut next_line = String::new();
-                stdin.read_line(&mut next_line).await?;
-
-                let mut body = vec![0u8; len];
-                tokio::io::AsyncReadExt::read_exact(&mut stdin, &mut body).await?;
-
-                if let Ok(request) = serde_json::from_slice::<RpcRequest>(&body) {
-                    self.handle_request(request).await?;
-                }
-            } else if !header.trim().is_empty() {
-                if let Ok(request) = serde_json::from_str::<RpcRequest>(&header) {
-                    self.handle_request(request).await?;
+            loop {
+                match try_decode_rpc_message(&buf) {
+                    Ok(Some((consumed, DecodedMessage::Request(request)))) => {
+                        buf.drain(..consumed);
+                        self.handle_request(request).await?;
+                    }
+                    Ok(Some((consumed, DecodedMessage::Response))) => {
+                        buf.drain(..consumed);
+                    }
+                    Ok(None) => break,
+                    Err(e) => {
+                        eprintln!("[xylem] msgpack decode error: {}", e);
+                        buf.clear();
+                        break;
+                    }
                 }
             }
         }
@@ -75,7 +83,7 @@ impl XylemServer {
                 let spec = GrammarSpec { name, repo, revision, queries };
                 tokio::spawn(async move {
                     if let Ok(path) = ParserInstaller::install(spec).await {
-                        println!("Installed to: {:?}", path);
+                        eprintln!("[xylem] Installed to: {:?}", path);
                     }
                 });
             }
@@ -85,5 +93,31 @@ impl XylemServer {
 
     pub fn shutdown(&self) {
         self.running.store(false, Ordering::SeqCst);
+    }
+}
+
+fn try_decode_rpc_message(buf: &[u8]) -> anyhow::Result<Option<(usize, DecodedMessage)>> {
+    let slice = &mut &buf[..];
+    match rmpv::decode::read_value(slice) {
+        Ok(value) => {
+            let consumed = buf.len() - slice.len();
+            let msg = MsgpackRpcIn::from_value(value)?;
+            match msg {
+                MsgpackRpcIn::Request { .. } | MsgpackRpcIn::Notification { .. } => {
+                    let request = msg.into_rpc_request()?;
+                    Ok(Some((consumed, DecodedMessage::Request(request))))
+                }
+                MsgpackRpcIn::Response { .. } => {
+                    Ok(Some((consumed, DecodedMessage::Response)))
+                }
+            }
+        }
+        Err(e) => {
+            if e.kind() == std::io::ErrorKind::UnexpectedEof {
+                Ok(None)
+            } else {
+                Err(anyhow::anyhow!("msgpack decode error: {}", e))
+            }
+        }
     }
 }
