@@ -83,6 +83,27 @@ impl BufferState {
         self.dirty_regions.push(DirtyRegion { byte_range: start_byte..end_byte.max(new_end) });
     }
 
+    pub fn full_reparse(&mut self) -> Vec<HighlightDelta> {
+        self.parser.parse_full(&self.buffer);
+        self.source_bytes = {
+            let mut bytes = Vec::with_capacity(self.buffer.len_bytes());
+            for chunk in self.buffer.chunks() {
+                bytes.extend_from_slice(chunk.as_bytes());
+            }
+            bytes
+        };
+        self.is_dirty = false;
+        self.version += 1;
+        self.compute_highlights()
+    }
+
+    pub fn apply_multiple_changes(&mut self, changes: &[(usize, usize, String)]) -> Vec<HighlightDelta> {
+        for (start_byte, end_byte, text) in changes {
+            self.apply_change(*start_byte, *end_byte, text);
+        }
+        self.compute_highlights()
+    }
+
     pub fn compute_highlights(&mut self) -> Vec<HighlightDelta> {
         let root = match self.parser.root_node() {
             Some(r) => r,
@@ -130,6 +151,19 @@ impl RuntimeState {
     pub fn set_text(&mut self, text: &str) {
         let state = self.buffers.entry(self.current_buffer_id).or_insert_with(BufferState::new);
         state.set_text(text);
+    }
+
+    pub fn full_parse(&mut self, buffer_id: u64) -> Vec<HighlightDelta> {
+        if let Some(state) = self.buffers.get_mut(&buffer_id) {
+            state.full_reparse()
+        } else {
+            vec![]
+        }
+    }
+
+    pub fn apply_changes_and_parse(&mut self, buffer_id: u64, changes: &[(usize, usize, String)]) -> Vec<HighlightDelta> {
+        let state = self.buffers.entry(buffer_id).or_insert_with(BufferState::new);
+        state.apply_multiple_changes(changes)
     }
 
     pub fn apply_change(&mut self, change: &EditorEvent) -> Option<Vec<HighlightDelta>> {

@@ -1,7 +1,8 @@
 use xylem::runtime::state::RuntimeState;
-use xylem::editor::events::EditorEvent;
-use xylem::editor::messages::{XylemMessage, ServerCommand};
+use xylem::editor::messages::{ServerCommand, XylemMessage};
 use xylem::editor::rpc_server::XylemServer;
+use xylem::runtime::scheduler::{ParseJob, Priority, scheduler_loop};
+use xylem::runtime::workers::{parse_worker_loop, ParseResult};
 
 use std::io::Write;
 use std::sync::Arc;
@@ -21,31 +22,58 @@ async fn main() -> anyhow::Result<()> {
     }
 
     if is_rpc {
-        let (tx, mut rx) = mpsc::channel::<ServerCommand>(100);
-        let runtime = Arc::new(RwLock::new(RuntimeState::new()));
-        let runtime_clone = runtime.clone();
-        let tx_clone = tx.clone();
+        let (cmd_tx, mut cmd_rx) = mpsc::channel::<ServerCommand>(100);
+        let (job_tx, job_rx) = mpsc::channel::<ParseJob>(32);
+        let (result_tx, mut result_rx) = mpsc::unbounded_channel::<ParseResult>();
+        let (schedule_tx, schedule_rx) = mpsc::unbounded_channel::<ParseJob>();
+
+        let state = Arc::new(RwLock::new(RuntimeState::new()));
+
+        let state_for_workers = state.clone();
+        tokio::spawn(async move {
+            parse_worker_loop(job_rx, state_for_workers, result_tx).await;
+        });
 
         tokio::spawn(async move {
-            while let Some(cmd) = rx.recv().await {
+            scheduler_loop(schedule_rx, job_tx).await;
+        });
+
+        tokio::spawn(async move {
+            while let Some(result) = result_rx.recv().await {
+                let _ = send_delta_to_stdout(result.buffer_id, 0, result.deltas);
+            }
+        });
+
+        let state_for_dispatch = state.clone();
+        let schedule_tx_for_dispatch = schedule_tx.clone();
+        tokio::spawn(async move {
+            while let Some(cmd) = cmd_rx.recv().await {
                 match cmd {
                     ServerCommand::UpdateState(msg) => {
                         match msg {
-                            XylemMessage::Change { buffer_id, text } => {
-                                let event = EditorEvent::Reload { buffer_id, text };
-                                runtime_clone.write().apply_change(&event);
-                            }
                             XylemMessage::Attach { buffer_id } => {
-                                runtime_clone.write().set_buffer_id(buffer_id);
+                                state_for_dispatch.write().set_buffer_id(buffer_id);
+                            }
+                            XylemMessage::Detach { buffer_id } => {
+                                let _ = state_for_dispatch.write().buffers.remove(&buffer_id);
                             }
                             _ => {}
                         }
                     }
                     ServerCommand::UpdateStateWithReply { event, buffer_id } => {
-                        let deltas = runtime_clone.write().apply_change(&event);
-                        let version = runtime_clone.read().buffers.get(&buffer_id).map(|b| b.version).unwrap_or(0);
-                        if let Some(deltas) = deltas {
-                            let _ = tx_clone.send(ServerCommand::SendDelta { buffer_id, version, deltas }).await;
+                        if let xylem::editor::events::EditorEvent::Change {
+                            start_byte,
+                            end_byte,
+                            text,
+                            ..
+                        } = event
+                        {
+                            let _ = schedule_tx_for_dispatch.send(ParseJob {
+                                buffer_id,
+                                priority: Priority::Normal,
+                                changes: vec![(start_byte, end_byte, text)],
+                                enqueued: tokio::time::Instant::now(),
+                            });
                         }
                     }
                     ServerCommand::SendDelta { buffer_id, version, deltas } => {
@@ -57,7 +85,7 @@ async fn main() -> anyhow::Result<()> {
             }
         });
 
-        let server = XylemServer::new(tx);
+        let server = XylemServer::new(cmd_tx);
         server.process_stdin().await?;
         server.shutdown();
     } else {
