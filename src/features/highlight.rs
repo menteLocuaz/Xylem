@@ -11,7 +11,7 @@ use streaming_iterator::StreamingIterator;
 pub struct CaptureEntry {
     pub start_col: u32,
     pub end_col: u32,
-    pub hl_group: String,
+    pub hl_group: Arc<str>,
 }
 
 #[derive(Clone, Debug)]
@@ -24,6 +24,7 @@ pub struct HighlightEngine {
     custom_queries: Arc<RwLock<Vec<Arc<CachedQuery>>>>,
     engine: QueryEngine,
     capture_cache: HashMap<u32, Vec<CaptureEntry>>,
+    cursor: QueryCursor,
 }
 
 impl HighlightEngine {
@@ -32,6 +33,7 @@ impl HighlightEngine {
             custom_queries: Arc::new(RwLock::new(Vec::new())),
             engine: QueryEngine::new(),
             capture_cache: HashMap::new(),
+            cursor: QueryCursor::new(),
         }
     }
 
@@ -148,15 +150,14 @@ impl HighlightEngine {
     }
 
     fn collect_all_captures(
-        &self,
+        &mut self,
         root: Node,
         source: &[u8],
         lang: &str,
         language: Language,
         captures_by_line: &mut HashMap<u32, Vec<CaptureEntry>>,
     ) {
-        let mut add_captures = |query: &Query| {
-            let mut cursor = QueryCursor::new();
+        let mut add_captures = |query: &Query, cursor: &mut QueryCursor| {
             let mut matches = cursor.matches(query, root, source);
             while let Some(m) = matches.next() {
                 for capture in m.captures {
@@ -165,7 +166,7 @@ impl HighlightEngine {
                     let end_line = node.end_position().row as u32;
                     let start_col = node.start_position().column as u32;
                     let end_col = node.end_position().column as u32;
-                    let hl_group = query.capture_names()[capture.index as usize].to_string();
+                    let hl_group: Arc<str> = query.capture_names()[capture.index as usize].into();
 
                     let entry = CaptureEntry {
                         start_col,
@@ -184,16 +185,17 @@ impl HighlightEngine {
         };
 
         if let Some(cached_query) = self.engine.get(lang, QueryType::Highlights, &language) {
-            add_captures(&cached_query.query);
+            add_captures(&cached_query.query, &mut self.cursor);
         }
 
-        for cached_query in self.custom_queries.read().iter() {
-            add_captures(&cached_query.query);
+        let custom = self.custom_queries.read().clone();
+        for cached_query in custom {
+            add_captures(&cached_query.query, &mut self.cursor);
         }
     }
 
     fn collect_captures_in_range(
-        &self,
+        &mut self,
         root: Node,
         source: &[u8],
         lang: &str,
@@ -202,8 +204,7 @@ impl HighlightEngine {
         line_range: std::ops::RangeInclusive<u32>,
         captures_by_line: &mut HashMap<u32, Vec<CaptureEntry>>,
     ) {
-        let mut add_captures = |query: &Query| {
-            let mut cursor = QueryCursor::new();
+        let mut add_captures = |query: &Query, cursor: &mut QueryCursor| {
             cursor.set_byte_range(byte_range.clone());
             let mut matches = cursor.matches(query, root, source);
             while let Some(m) = matches.next() {
@@ -213,7 +214,7 @@ impl HighlightEngine {
                     let end_line = node.end_position().row as u32;
                     let start_col = node.start_position().column as u32;
                     let end_col = node.end_position().column as u32;
-                    let hl_group = query.capture_names()[capture.index as usize].to_string();
+                    let hl_group: Arc<str> = query.capture_names()[capture.index as usize].into();
 
                     let entry = CaptureEntry {
                         start_col,
@@ -234,11 +235,12 @@ impl HighlightEngine {
         };
 
         if let Some(cached_query) = self.engine.get(lang, QueryType::Highlights, &language) {
-            add_captures(&cached_query.query);
+            add_captures(&cached_query.query, &mut self.cursor);
         }
 
-        for cached_query in self.custom_queries.read().iter() {
-            add_captures(&cached_query.query);
+        let custom = self.custom_queries.read().clone();
+        for cached_query in custom {
+            add_captures(&cached_query.query, &mut self.cursor);
         }
     }
 }

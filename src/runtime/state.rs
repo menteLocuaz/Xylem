@@ -1,8 +1,12 @@
 use ropey::Rope;
-use std::collections::HashMap;
+use std::sync::Arc;
 use std::ops::Range;
+use dashmap::DashMap;
+use parking_lot::RwLock;
+use serde::{Serialize, Deserialize};
 use crate::parser::{IncrementalParser, diff::compute_edit_positions};
 use crate::editor::events::EditorEvent;
+use crate::parser::queries::types::HighlightKind;
 
 use crate::features::highlight::{HighlightEngine, HighlightDelta};
 
@@ -14,6 +18,7 @@ pub struct DirtyRegion {
 pub struct BufferState {
     pub buffer: Rope,
     source_bytes: Vec<u8>,
+    source_bytes_dirty: bool,
     pub parser: IncrementalParser,
     pub highlight_engine: HighlightEngine,
     pub is_dirty: bool,
@@ -26,6 +31,7 @@ impl BufferState {
         Self {
             buffer: Rope::new(),
             source_bytes: Vec::new(),
+            source_bytes_dirty: false,
             parser: IncrementalParser::new(),
             highlight_engine: HighlightEngine::new(),
             is_dirty: false,
@@ -37,11 +43,24 @@ impl BufferState {
     pub fn set_text(&mut self, text: &str) {
         self.buffer = Rope::from_str(text);
         self.source_bytes = text.as_bytes().to_vec();
+        self.source_bytes_dirty = false;
         self.parser.parse_full(&self.buffer);
         self.is_dirty = false;
         self.version += 1;
         self.dirty_regions.clear();
         self.dirty_regions.push(DirtyRegion { byte_range: 0..self.buffer.len_bytes() });
+    }
+
+    pub fn ensure_source_bytes(&mut self) {
+        if !self.source_bytes_dirty {
+            return;
+        }
+        let mut bytes = Vec::with_capacity(self.buffer.len_bytes());
+        for chunk in self.buffer.chunks() {
+            bytes.extend_from_slice(chunk.as_bytes());
+        }
+        self.source_bytes = bytes;
+        self.source_bytes_dirty = false;
     }
 
     pub fn apply_change(&mut self, start_byte: usize, end_byte: usize, text: &str) {
@@ -53,11 +72,7 @@ impl BufferState {
         self.buffer.remove(start_char..end_char);
         self.buffer.insert(start_char, text);
 
-        let mut bytes = Vec::with_capacity(self.buffer.len_bytes());
-        for chunk in self.buffer.chunks() {
-            bytes.extend_from_slice(chunk.as_bytes());
-        }
-        self.source_bytes = bytes;
+        self.source_bytes_dirty = true;
 
         let (start_pos, old_end_pos) = compute_edit_positions(&old_text, start_byte, end_byte);
         let new_end_pos = compute_edit_positions(
@@ -85,13 +100,7 @@ impl BufferState {
 
     pub fn full_reparse(&mut self) -> Vec<HighlightDelta> {
         self.parser.parse_full(&self.buffer);
-        self.source_bytes = {
-            let mut bytes = Vec::with_capacity(self.buffer.len_bytes());
-            for chunk in self.buffer.chunks() {
-                bytes.extend_from_slice(chunk.as_bytes());
-            }
-            bytes
-        };
+        self.source_bytes_dirty = true;
         self.is_dirty = false;
         self.version += 1;
         self.compute_highlights()
@@ -105,6 +114,7 @@ impl BufferState {
     }
 
     pub fn compute_highlights(&mut self) -> Vec<HighlightDelta> {
+        self.ensure_source_bytes();
         let root = match self.parser.root_node() {
             Some(r) => r,
             None => return vec![],
@@ -131,60 +141,64 @@ impl BufferState {
 }
 
 pub struct RuntimeState {
-    pub buffers: HashMap<u64, BufferState>,
-    pub current_buffer_id: u64,
+    pub buffers: DashMap<u64, Arc<RwLock<BufferState>>>,
+    pub current_buffer_id: Arc<RwLock<u64>>,
 }
 
 impl RuntimeState {
     pub fn new() -> Self {
         Self {
-            buffers: HashMap::new(),
-            current_buffer_id: 0,
+            buffers: DashMap::new(),
+            current_buffer_id: Arc::new(RwLock::new(0)),
         }
     }
 
-    pub fn set_buffer_id(&mut self, id: u64) {
-        self.current_buffer_id = id;
-        self.buffers.entry(id).or_insert_with(BufferState::new);
+    pub fn set_buffer_id(&self, id: u64) {
+        *self.current_buffer_id.write() = id;
+        self.buffers.entry(id).or_insert_with(|| Arc::new(RwLock::new(BufferState::new())));
     }
 
-    pub fn set_text(&mut self, text: &str) {
-        let state = self.buffers.entry(self.current_buffer_id).or_insert_with(BufferState::new);
-        state.set_text(text);
+    pub fn set_text(&self, text: &str) {
+        let id = *self.current_buffer_id.read();
+        let state = self.buffers.entry(id).or_insert_with(|| Arc::new(RwLock::new(BufferState::new())));
+        state.write().set_text(text);
     }
 
-    pub fn full_parse(&mut self, buffer_id: u64) -> Vec<HighlightDelta> {
-        if let Some(state) = self.buffers.get_mut(&buffer_id) {
-            state.full_reparse()
+    pub fn full_parse(&self, buffer_id: u64) -> Vec<HighlightDelta> {
+        if let Some(state) = self.buffers.get(&buffer_id) {
+            state.write().full_reparse()
         } else {
             vec![]
         }
     }
 
-    pub fn apply_changes_and_parse(&mut self, buffer_id: u64, changes: &[(usize, usize, String)]) -> Vec<HighlightDelta> {
-        let state = self.buffers.entry(buffer_id).or_insert_with(BufferState::new);
-        state.apply_multiple_changes(changes)
+    pub fn apply_changes_and_parse(&self, buffer_id: u64, changes: &[(usize, usize, String)]) -> Vec<HighlightDelta> {
+        let state = self.buffers.entry(buffer_id).or_insert_with(|| Arc::new(RwLock::new(BufferState::new())));
+        state.write().apply_multiple_changes(changes)
     }
 
-    pub fn apply_change(&mut self, change: &EditorEvent) -> Option<Vec<HighlightDelta>> {
+    pub fn apply_change(&self, change: &EditorEvent) -> Option<Vec<HighlightDelta>> {
         match change {
             EditorEvent::Change { buffer_id, start_byte, end_byte, text } => {
-                let id = if *buffer_id == 0 { self.current_buffer_id } else { *buffer_id };
-                let state = self.buffers.entry(id).or_insert_with(BufferState::new);
-                state.apply_change(*start_byte, *end_byte, text);
-                Some(state.compute_highlights())
+                let id = if *buffer_id == 0 { *self.current_buffer_id.read() } else { *buffer_id };
+                let state = self.buffers.entry(id).or_insert_with(|| Arc::new(RwLock::new(BufferState::new())));
+                let mut state_guard = state.write();
+                state_guard.apply_change(*start_byte, *end_byte, text);
+                Some(state_guard.compute_highlights())
             }
             EditorEvent::Reload { buffer_id, text } => {
-                let id = if *buffer_id == 0 { self.current_buffer_id } else { *buffer_id };
-                let state = self.buffers.entry(id).or_insert_with(BufferState::new);
-                state.set_text(text);
-                Some(state.compute_highlights())
+                let id = if *buffer_id == 0 { *self.current_buffer_id.read() } else { *buffer_id };
+                let state = self.buffers.entry(id).or_insert_with(|| Arc::new(RwLock::new(BufferState::new())));
+                let mut state_guard = state.write();
+                state_guard.set_text(text);
+                Some(state_guard.compute_highlights())
             }
             EditorEvent::Save { buffer_id } => {
-                let id = if *buffer_id == 0 { self.current_buffer_id } else { *buffer_id };
-                if let Some(state) = self.buffers.get_mut(&id) {
-                    state.is_dirty = false;
-                    state.dirty_regions.clear();
+                let id = if *buffer_id == 0 { *self.current_buffer_id.read() } else { *buffer_id };
+                if let Some(state) = self.buffers.get(&id) {
+                    let mut state_guard = state.write();
+                    state_guard.is_dirty = false;
+                    state_guard.dirty_regions.clear();
                 }
                 None
             }
@@ -193,7 +207,8 @@ impl RuntimeState {
     }
 
     pub fn get_highlights(&self) -> Vec<HighlightRange> {
-        self.get_highlights_for_buffer(self.current_buffer_id)
+        let id = *self.current_buffer_id.read();
+        self.get_highlights_for_buffer(id)
     }
 
     pub fn get_highlights_for_buffer(&self, buffer_id: u64) -> Vec<HighlightRange> {
@@ -202,9 +217,11 @@ impl RuntimeState {
             None => return Vec::new(),
         };
 
-        if let Some(root) = state.parser.root_node() {
-            let source = &state.source_bytes;
-            state.highlight_engine.apply_highlights(
+        let mut state_guard = state.write();
+        state_guard.ensure_source_bytes();
+        if let Some(root) = state_guard.parser.root_node() {
+            let source = &state_guard.source_bytes;
+            state_guard.highlight_engine.apply_highlights(
                 root,
                 source,
                 "lua",
@@ -221,9 +238,6 @@ impl Default for RuntimeState {
         Self::new()
     }
 }
-
-use serde::{Serialize, Deserialize};
-use crate::parser::queries::types::HighlightKind;
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct HighlightRange {

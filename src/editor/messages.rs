@@ -23,6 +23,14 @@ pub enum RpcRequest {
         revision: String,
         queries: Vec<String>,
     },
+    #[serde(rename = "xylem.sync_all")]
+    SyncAll,
+    #[serde(rename = "xylem.sync_one")]
+    SyncOne { name: String },
+    #[serde(rename = "xylem.info")]
+    Info,
+    #[serde(rename = "xylem.get_grammars")]
+    GetGrammars,
 }
 
 #[derive(Debug)]
@@ -107,6 +115,15 @@ impl MsgpackRpcIn {
                 let p: P = rmp_serde::from_slice(&params_bytes)?;
                 RpcRequest::Install { name: p.name, repo: p.repo, revision: p.revision, queries: p.queries }
             }
+            "xylem.sync_all" => RpcRequest::SyncAll,
+            "xylem.sync_one" => {
+                #[derive(Deserialize)]
+                struct P { name: String }
+                let p: P = rmp_serde::from_slice(&params_bytes)?;
+                RpcRequest::SyncOne { name: p.name }
+            }
+            "xylem.info" => RpcRequest::Info,
+            "xylem.get_grammars" => RpcRequest::GetGrammars,
             other => return Err(anyhow::anyhow!("unknown method: {}", other)),
         };
 
@@ -120,6 +137,8 @@ pub enum XylemMessage {
     Detach { buffer_id: u64 },
     Change { buffer_id: u64, text: String },
     Parse { buffer_id: u64 },
+    SyncAll,
+    SyncOne { name: String },
 }
 
 #[derive(Debug)]
@@ -137,6 +156,12 @@ pub enum ServerCommand {
     Reply {
         buffer_id: u64,
         deltas: Option<Vec<crate::features::highlight::HighlightDelta>>,
+    },
+    Info {
+        msgid: u64,
+    },
+    GetGrammars {
+        msgid: u64,
     },
     Shutdown,
 }
